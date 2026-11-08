@@ -11,6 +11,7 @@ import live_avatar
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / ".res" / "en_US-hfc_female-medium.onnx"
+PICTURE = ROOT / ".res" / "avatar.jpg"
 
 
 def main() -> None:
@@ -18,6 +19,7 @@ def main() -> None:
 
     engine = live_avatar.Engine(
         voice_model=str(MODEL),
+        picture=str(PICTURE),
         size=64,
         strength=0.5,
     )
