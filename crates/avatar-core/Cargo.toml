@@ -11,6 +11,9 @@ thiserror.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hound = "3"
+image = "0.25"
+wgpu = "26"
+bytemuck = { version = "1", features = ["derive"] }
 
 # Piper TTS (embedded, in-process ONNX Runtime) — task 3.
 piper-rs = { version = "0.2", optional = true }
@@ -24,3 +27,4 @@ embedded = ["dep:piper-rs", "dep:espeak-rs"]
 subprocess = []
 
 [dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

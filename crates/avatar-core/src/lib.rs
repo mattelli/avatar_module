@@ -11,6 +11,7 @@
 //! - pipeline glue (task 9)
 
 pub mod analysis;
+pub mod atlas;
 pub mod markers;
 pub mod tts;
 pub mod visemes;

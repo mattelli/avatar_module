@@ -1,0 +1,592 @@
+//! Expression atlas (report §3.6, plan task 6).
+//!
+//! Warps the base picture into 7 expression variants (`neutral`, `happy`,
+//! `mad`, `sad`, `surprised`, `disgusted`, `fearful`) using a GPU compute
+//! shader (`wgpu`), with a CPU reference implementation used for tests and as
+//! a fallback when no GPU device is available.
+//!
+//! The warp is an inverse-distance-weighted displacement field over per-mode
+//! control points (mouth corners, brows, eye corners, nose, chin). Each
+//! control point has a displacement (normalized to image size) that is
+//! applied with strength `s` (style-dependent: photos use softer warps,
+//! cartoons stronger ones).
+//!
+//! Output layout: the atlas is a vertical stack of 7 bands, each the size of
+//! the base image; band `i` is the variant for `Mode` with discriminant `i`
+//! (matching `markers::Mode` order: neutral, happy, mad, sad, surprised,
+//! disgusted, fearful).
+
+use crate::markers::Mode;
+use image::{GenericImageView, ImageBuffer, Rgba};
+use std::path::Path;
+use wgpu::util::DeviceExt;
+
+/// Control point: position (normalized) + displacement (normalized).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControlPoint {
+    /// Position in normalized coordinates [0, 1].
+    pub pos: [f32; 2],
+    /// Displacement in normalized coordinates (added to the position).
+    pub disp: [f32; 2],
+}
+
+/// Warp parameters for one expression variant.
+#[derive(Debug, Clone)]
+pub struct WarpParams {
+    /// Global warp strength (photos ~0.5, cartoons ~1.0).
+    pub strength: f32,
+    /// Control points for this mode.
+    pub points: Vec<ControlPoint>,
+}
+
+/// The 7 expression modes in atlas order.
+pub const ATLAS_MODES: [Mode; 7] = [
+    Mode::Neutral,
+    Mode::Happy,
+    Mode::Mad,
+    Mode::Sad,
+    Mode::Surprised,
+    Mode::Disgusted,
+    Mode::Fearful,
+];
+
+/// Default control points for a face (normalized coordinates, y down).
+/// Mouth center ≈ (0.5, 0.72), brows ≈ (0.35/0.65, 0.45), eyes ≈ (0.35/0.65, 0.52),
+/// nose ≈ (0.5, 0.60), chin ≈ (0.5, 0.88).
+fn face_points() -> Vec<ControlPoint> {
+    vec![
+        ControlPoint { pos: [0.5, 0.72], disp: [0.0, 0.0] },   // mouth center
+        ControlPoint { pos: [0.42, 0.70], disp: [0.0, 0.0] },  // mouth left
+        ControlPoint { pos: [0.58, 0.70], disp: [0.0, 0.0] },  // mouth right
+        ControlPoint { pos: [0.35, 0.45], disp: [0.0, 0.0] },  // brow left
+        ControlPoint { pos: [0.65, 0.45], disp: [0.0, 0.0] },  // brow right
+        ControlPoint { pos: [0.35, 0.52], disp: [0.0, 0.0] },  // eye left
+        ControlPoint { pos: [0.65, 0.52], disp: [0.0, 0.0] },  // eye right
+        ControlPoint { pos: [0.5, 0.60], disp: [0.0, 0.0] },   // nose
+        ControlPoint { pos: [0.5, 0.88], disp: [0.0, 0.0] },   // chin
+    ]
+}
+
+/// Builds warp parameters for a mode. `strength` scales the style (photos
+/// softer, cartoons stronger).
+pub fn warp_params(mode: Mode, strength: f32) -> WarpParams {
+    let mut pts = face_points();
+    let mut set = |i: usize, dx: f32, dy: f32| {
+        pts[i].disp = [dx, dy];
+    };
+    match mode {
+        Mode::Neutral => {} // no displacement
+        Mode::Happy => {
+            // Mouth corners up and out, cheeks slightly raised.
+            set(1, -0.02, -0.03);
+            set(2, 0.02, -0.03);
+            set(0, 0.0, 0.01);
+            set(3, 0.0, -0.01);
+            set(4, 0.0, -0.01);
+        }
+        Mode::Mad => {
+            // Brows down and inward, mouth corners down.
+            set(3, 0.02, 0.02);
+            set(4, -0.02, 0.02);
+            set(1, 0.01, 0.02);
+            set(2, -0.01, 0.02);
+        }
+        Mode::Sad => {
+            // Brows up and inward, mouth corners down.
+            set(3, -0.01, -0.02);
+            set(4, 0.01, -0.02);
+            set(1, 0.01, 0.03);
+            set(2, -0.01, 0.03);
+            set(0, 0.0, 0.02);
+        }
+        Mode::Surprised => {
+            // Brows up, mouth open (stretched down), eyes wide.
+            set(3, 0.0, -0.03);
+            set(4, 0.0, -0.03);
+            set(0, 0.0, 0.03);
+            set(5, 0.0, -0.01);
+            set(6, 0.0, -0.01);
+        }
+        Mode::Disgusted => {
+            // Nose up, upper lip raised, brows down.
+            set(7, 0.0, -0.02);
+            set(0, 0.0, -0.02);
+            set(3, 0.01, 0.01);
+            set(4, -0.01, 0.01);
+        }
+        Mode::Fearful => {
+            // Brows up and inward, mouth stretched wide, eyes wide.
+            set(3, -0.02, -0.02);
+            set(4, 0.02, -0.02);
+            set(1, -0.02, 0.01);
+            set(2, 0.02, 0.01);
+            set(5, 0.0, -0.01);
+            set(6, 0.0, -0.01);
+        }
+    }
+    WarpParams { strength, points: pts }
+}
+
+/// CPU reference warp: inverse-distance weighting over control points.
+/// `src` is RGBA8; returns the warped image of the same size.
+pub fn warp_cpu(src: &ImageBuffer<Rgba<u8>, Vec<u8>>, params: &WarpParams) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let (w, h) = src.dimensions();
+    let (w, h) = (w as usize, h as usize);
+    let mut out = ImageBuffer::new(w as u32, h as u32);
+    for y in 0..h {
+        for x in 0..w {
+            let pn = [x as f32 / w as f32, y as f32 / h as f32];
+            let mut disp = [0.0f32, 0.0];
+            let mut wsum = 0.0f32;
+            for cp in &params.points {
+                let d = (pn[0] - cp.pos[0]).hypot(pn[1] - cp.pos[1]);
+                let weight = 1.0 / (d * d + 0.004);
+                disp[0] += weight * cp.disp[0];
+                disp[1] += weight * cp.disp[1];
+                wsum += weight;
+            }
+            disp[0] /= wsum;
+            disp[1] /= wsum;
+            let sp = [
+                (pn[0] - disp[0] * params.strength).clamp(0.0, 1.0),
+                (pn[1] - disp[1] * params.strength).clamp(0.0, 1.0),
+            ];
+            // Bilinear sample (uv * dims convention, matching the GPU shader).
+            let sx = sp[0] * w as f32;
+            let sy = sp[1] * h as f32;
+            let x0 = (sx.floor() as usize).min(w - 1);
+            let y0 = (sy.floor() as usize).min(h - 1);
+            let x1 = (x0 + 1).min(w - 1);
+            let y1 = (y0 + 1).min(h - 1);
+            let fx = sx - x0 as f32;
+            let fy = sy - y0 as f32;
+            let px = |xx: usize, yy: usize| -> [f32; 4] {
+                let p = src.get_pixel(xx as u32, yy as u32);
+                [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32]
+            };
+            let c00 = px(x0, y0);
+            let c10 = px(x1, y0);
+            let c01 = px(x0, y1);
+            let c11 = px(x1, y1);
+            let mut c = [0.0f32; 4];
+            for k in 0..4 {
+                let c0 = c00[k] * (1.0 - fx) + c10[k] * fx;
+                let c1 = c01[k] * (1.0 - fx) + c11[k] * fx;
+                c[k] = c0 * (1.0 - fy) + c1 * fy;
+            }
+            out.put_pixel(
+                x as u32,
+                y as u32,
+                Rgba([c[0] as u8, c[1] as u8, c[2] as u8, c[3] as u8]),
+            );
+        }
+    }
+    out
+}
+
+/// Builds the full atlas on the CPU: 7 bands stacked vertically.
+pub fn atlas_cpu(src: &ImageBuffer<Rgba<u8>, Vec<u8>>, strength: f32) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let (w, h) = src.dimensions();
+    let mut out = ImageBuffer::new(w, h * ATLAS_MODES.len() as u32);
+    for (i, &mode) in ATLAS_MODES.iter().enumerate() {
+        let params = warp_params(mode, strength);
+        let warped = warp_cpu(src, &params);
+        for y in 0..h {
+            for x in 0..w {
+                let p = warped.get_pixel(x, y);
+                out.put_pixel(x, y + i as u32 * h, *p);
+            }
+        }
+    }
+    out
+}
+
+/// GPU uniform parameters (must match `Params` in atlas.wgsl).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuParams {
+    strength: f32,
+    n_points: u32,
+    pad0: f32,
+    pad1: f32,
+}
+
+/// GPU atlas builder (wgpu compute). Falls back to CPU if no device.
+pub struct AtlasBuilder {
+    device: Option<wgpu::Device>,
+    queue: Option<wgpu::Queue>,
+    pipeline: Option<wgpu::ComputePipeline>,
+}
+
+impl AtlasBuilder {
+    /// Requests a GPU device; returns `None` if unavailable.
+    pub async fn new() -> Option<Self> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("avatar-atlas"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .ok()?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("atlas.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("atlas.wgsl").into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("atlas-pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        Some(Self {
+            device: Some(device),
+            queue: Some(queue),
+            pipeline: Some(pipeline),
+        })
+    }
+
+    /// Whether a GPU device is available.
+    pub fn has_gpu(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// Builds the atlas on the GPU (or CPU fallback).
+    pub fn build(&self, src: &ImageBuffer<Rgba<u8>, Vec<u8>>, strength: f32) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+        if let (Some(device), Some(queue), Some(pipeline)) =
+            (&self.device, &self.queue, &self.pipeline)
+        {
+            match self.build_gpu(device, queue, pipeline, src, strength) {
+                Ok(atlas) => return atlas,
+                Err(e) => {
+                    eprintln!("atlas GPU build failed, falling back to CPU: {}", e);
+                }
+            }
+        }
+        atlas_cpu(src, strength)
+    }
+
+    fn build_gpu(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &wgpu::ComputePipeline,
+        src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+        strength: f32,
+    ) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+        let (w, h) = src.dimensions();
+        let modes = ATLAS_MODES.len() as u32;
+        let n_points = warp_params(Mode::Neutral, strength).points.len() as u32;
+        let params = GpuParams {
+            strength,
+            n_points,
+            pad0: 0.0,
+            pad1: 0.0,
+        };
+        // Flatten all control points for all modes.
+        let mut points: Vec<f32> = Vec::new();
+        for &mode in ATLAS_MODES.iter() {
+            let p = warp_params(mode, strength);
+            for cp in &p.points {
+                points.extend_from_slice(&[cp.pos[0], cp.pos[1], cp.disp[0], cp.disp[1]]);
+            }
+        }
+
+        let src_tex = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("atlas-src"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::default(),
+            src.as_raw(),
+        );
+        let src_view = src_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let dst_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atlas-dst"),
+            size: wgpu::Extent3d { width: w, height: h * modes, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let dst_view = dst_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("atlas-params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let points_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("atlas-points"),
+            contents: bytemuck::cast_slice(&points),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas-bind"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&src_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dst_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: points_buf.as_entire_binding() },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("atlas-encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("atlas-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(w.div_ceil(8), (h * modes).div_ceil(8), 1);
+        }
+        queue.submit(Some(encoder.finish()));
+
+        // Read back the atlas.
+        let bytes_per_row = (w * 4).next_multiple_of(256);
+        let buf_size = (bytes_per_row as u64) * ((h * modes) as u64);
+        let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atlas-read"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("atlas-copy"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &dst_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read_buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d { width: w, height: h * modes, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        // Map and read back.
+        let slice = read_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        // Wait for the map callback.
+        device
+            .poll(wgpu::PollType::Wait)
+            .map_err(|e| anyhow::anyhow!("poll failed: {:?}", e))?;
+        rx.recv()
+            .map_err(|e| anyhow::anyhow!("map callback lost: {}", e))??;
+
+        let data = slice.get_mapped_range();
+        let mut out = ImageBuffer::new(w, h * modes);
+        for y in 0..h * modes {
+            let row = &data
+                [y as usize * bytes_per_row as usize..(y as usize + 1) * bytes_per_row as usize];
+            for x in 0..w {
+                let o = x as usize * 4;
+                out.put_pixel(x, y, Rgba([row[o], row[o + 1], row[o + 2], row[o + 3]]));
+            }
+        }
+        drop(data);
+        read_buf.unmap();
+        Ok(out)
+    }
+}
+
+/// Loads an image from a file (PNG/JPEG).
+pub fn load_image(path: &Path) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    let img = image::open(path)?;
+    Ok(img.to_rgba8())
+}
+
+/// Saves an image to a file (format inferred from extension).
+pub fn save_image(img: &ImageBuffer<Rgba<u8>, Vec<u8>>, path: &Path) -> anyhow::Result<()> {
+    img.save(path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a synthetic "face" image: gradient background.
+    fn test_face(w: u32, h: u32) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+        let mut img = ImageBuffer::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let r = (x * 255 / w) as u8;
+                let g = (y * 255 / h) as u8;
+                let b = 128;
+                img.put_pixel(x, y, Rgba([r, g, b, 255]));
+            }
+        }
+        img
+    }
+
+    /// T6: warp_params returns 7 modes with sane points.
+    #[test]
+    fn warp_params_sane() {
+        for &mode in &ATLAS_MODES {
+            let p = warp_params(mode, 0.5);
+            assert_eq!(p.points.len(), 9);
+            assert!(p.strength > 0.0);
+            for cp in &p.points {
+                assert!(cp.pos[0] >= 0.0 && cp.pos[0] <= 1.0);
+                assert!(cp.pos[1] >= 0.0 && cp.pos[1] <= 1.0);
+                assert!(cp.disp[0].abs() < 0.2);
+                assert!(cp.disp[1].abs() < 0.2);
+            }
+        }
+        // Neutral has zero displacement.
+        let p = warp_params(Mode::Neutral, 0.5);
+        assert!(p.points.iter().all(|cp| cp.disp == [0.0, 0.0]));
+    }
+
+    /// T6: CPU warp of a neutral image is (near-)identity.
+    #[test]
+    fn neutral_warp_identity() {
+        let src = test_face(64, 64);
+        let params = warp_params(Mode::Neutral, 0.5);
+        let out = warp_cpu(&src, &params);
+        assert_eq!(out.dimensions(), src.dimensions());
+        for y in 0..64 {
+            for x in 0..64 {
+                let a = src.get_pixel(x, y);
+                let b = out.get_pixel(x, y);
+                let diff: i32 = (0..4).map(|k| (a[k] as i32 - b[k] as i32).abs()).sum();
+                assert!(diff <= 4, "pixel ({}, {}) diff {}", x, y, diff);
+            }
+        }
+    }
+
+    /// T6: happy warp changes pixels (mouth region moves).
+    #[test]
+    fn happy_warp_changes() {
+        let src = test_face(64, 64);
+        let params = warp_params(Mode::Happy, 1.0);
+        let out = warp_cpu(&src, &params);
+        let mut changed = 0;
+        for y in 0..64 {
+            for x in 0..64 {
+                let a = src.get_pixel(x, y);
+                let b = out.get_pixel(x, y);
+                if a != b {
+                    changed += 1;
+                }
+            }
+        }
+        assert!(changed > 0, "happy warp changed nothing");
+    }
+
+    /// T6: atlas has 7 bands, each the size of the source.
+    #[test]
+    fn atlas_shape() {
+        let src = test_face(32, 32);
+        let atlas = atlas_cpu(&src, 0.5);
+        assert_eq!(atlas.dimensions(), (32, 32 * 7));
+        // Band 0 (neutral) should match the source exactly.
+        for y in 0..32 {
+            for x in 0..32 {
+                assert_eq!(atlas.get_pixel(x, y), src.get_pixel(x, y));
+            }
+        }
+    }
+
+    /// T6: atlas bands differ from each other (all 7 modes present).
+    #[test]
+    fn atlas_bands_differ() {
+        let src = test_face(64, 64);
+        let atlas = atlas_cpu(&src, 1.0);
+        let h = 64;
+        let band = |i: usize| -> Vec<u8> {
+            let mut v = Vec::new();
+            for y in 0..h {
+                for x in 0..64 {
+                    let p = atlas.get_pixel(x, y + i as u32 * h);
+                    v.extend_from_slice(&p.0);
+                }
+            }
+            v
+        };
+        for i in 0..7 {
+            for j in (i + 1)..7 {
+                let a = band(i);
+                let b = band(j);
+                let diff: usize = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+                assert!(diff > 0, "bands {} and {} identical", i, j);
+            }
+        }
+    }
+
+    /// T6: GPU build (if available) matches CPU reference within tolerance.
+    #[test]
+    fn gpu_matches_cpu() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let builder = rt.block_on(AtlasBuilder::new());
+        let Some(builder) = builder else {
+            eprintln!("no GPU device available, skipping GPU test");
+            return;
+        };
+        let src = test_face(64, 64);
+        let gpu = builder.build(&src, 1.0);
+        let cpu = atlas_cpu(&src, 1.0);
+        assert_eq!(gpu.dimensions(), cpu.dimensions());
+        let mut max_diff = 0u32;
+        for y in 0..gpu.height() {
+            for x in 0..gpu.width() {
+                let a = gpu.get_pixel(x, y);
+                let b = cpu.get_pixel(x, y);
+                for k in 0..4 {
+                    max_diff = max_diff.max((a[k] as i32 - b[k] as i32).unsigned_abs());
+                }
+            }
+        }
+        assert!(max_diff <= 8, "GPU/CPU max diff {}", max_diff);
+    }
+
+    /// T6: image load/save round-trip.
+    #[test]
+    fn image_roundtrip() {
+        let tmp = std::env::temp_dir().join("avatar_atlas_test.png");
+        let src = test_face(16, 16);
+        save_image(&src, &tmp).unwrap();
+        let loaded = load_image(&tmp).unwrap();
+        assert_eq!(loaded.dimensions(), (16, 16));
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
