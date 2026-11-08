@@ -14,6 +14,9 @@ hound = "3"
 image = "0.25"
 wgpu = "26"
 bytemuck = { version = "1", features = ["derive"] }
+fdk-aac = { version = "0.8", optional = true }
+openh264 = "0.9"
+mp4 = "0.14"
 
 # Piper TTS (embedded, in-process ONNX Runtime) — task 3.
 piper-rs = { version = "0.2", optional = true }
@@ -25,6 +28,8 @@ default = ["embedded"]
 embedded = ["dep:piper-rs", "dep:espeak-rs"]
 # Subprocess fallback: shells out to the `piper` CLI binary.
 subprocess = []
+# FDK-AAC encoder for the audio track (optional).
+aac = ["dep:fdk-aac"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

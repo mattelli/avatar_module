@@ -1,5 +1,6 @@
 pub mod analysis;                                                                                                                                                                                               
-pub mod atlas;                                                                                                                                                                                                  
+pub mod atlas;
+pub mod encoder;                                                                                                                                                                                                  
 pub mod markers;                                                                                                                                                                                                
 pub mod renderer;                                                                                                                                                                                               
 pub mod tts;                                                                                                                                                                                                    
