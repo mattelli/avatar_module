@@ -17,6 +17,8 @@ bytemuck = { version = "1", features = ["derive"] }
 fdk-aac = { version = "0.8", optional = true }
 openh264 = "0.9"
 mp4 = "0.14"
+# Async runtime for blocking on wgpu device requests in the sync pipeline.
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 
 # Piper TTS (embedded, in-process ONNX Runtime) — task 3.
 piper-rs = { version = "0.2", optional = true }
@@ -32,4 +34,4 @@ subprocess = []
 aac = ["dep:fdk-aac"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
