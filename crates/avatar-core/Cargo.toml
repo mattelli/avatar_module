@@ -8,5 +8,18 @@ description = "Core pipeline: text -> Piper TTS -> viseme lip-sync -> wgpu rende
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Piper TTS (embedded, in-process ONNX Runtime) — task 3.
+piper-rs = { version = "0.2", optional = true }
+espeak-rs = { version = "0.2", optional = true, default-features = false }
+
+[features]
+default = ["embedded"]
+# Embedded backend: piper-rs runs the ONNX model in-process.
+embedded = ["dep:piper-rs", "dep:espeak-rs"]
+# Subprocess fallback: shells out to the `piper` CLI binary.
+subprocess = []
 
 [dev-dependencies]
