@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.*/
+
+
+# Logs
+*.log
+
+# ENV
+.env
+
+# IDE
+# .vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*.wav
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.avi
+*.mov
+*.gif
+
+
+# Rust
+rust/target/
+Cargo.lock
