@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "live_avatar"
+requires-python = ">=3.10"
+description = "Text to MP4 avatar video: Piper TTS, viseme lip-sync, wgpu rendering, H.264/AAC MP4"
+license = { text = "MIT" }
+version = "0.1.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video",
+]
+keywords = ["avatar", "tts", "lip-sync", "wgpu"]
+
+[tool.maturin]
+manifest = "crates/avatar-py/Cargo.toml"
+features = ["pyo3/extension-module"]
+# espeak-ng phonemization data ships inside the wheel (report §3.8, ~20 MB).
+include = [
+    { path = ".res/espeak-ng-data/**", format = "sdist" },
+    { path = ".res/espeak-ng-data/**", format = "wheel" },
+]

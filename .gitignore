@@ -33,3 +33,5 @@ Thumbs.db
 # Rust
 target/
 Cargo.lock
+# Python wheel build output 
+dist/ 
