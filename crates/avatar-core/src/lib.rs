@@ -13,6 +13,7 @@
 pub mod analysis;
 pub mod markers;
 pub mod tts;
+pub mod visemes;
 
 /// Placeholder module so the crate compiles before the first real component lands.
 pub mod placeholder {
