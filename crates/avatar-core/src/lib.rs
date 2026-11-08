@@ -10,6 +10,8 @@
 //! - H.264 + AAC + MP4 mux (task 8)
 //! - pipeline glue (task 9)
 
+pub mod markers;
+
 /// Placeholder module so the crate compiles before the first real component lands.
 pub mod placeholder {
     /// Returns the crate version.
