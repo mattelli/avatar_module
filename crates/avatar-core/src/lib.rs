@@ -10,6 +10,7 @@
 //! - H.264 + AAC + MP4 mux (task 8)
 //! - pipeline glue (task 9)
 
+pub mod analysis;
 pub mod markers;
 pub mod tts;
 
