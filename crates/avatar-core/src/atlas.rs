@@ -462,6 +462,28 @@ pub fn save_image(img: &ImageBuffer<Rgba<u8>, Vec<u8>>, path: &Path) -> anyhow::
     Ok(())                                                                                                                                                                                                      
 }                                                                                                                                                                                                               
                                                                                                                                                                                                                 
+/// Maximum working size (longest side, px) for the atlas source picture.
+///
+/// The atlas is warped at the source resolution before the renderer downsamples
+/// to the 32/64 px output, so warping a large photo (e.g. 740×740) wastes CPU.
+/// Downscaling to at most this size keeps the warp cheap with no visible change.
+pub const MAX_ATLAS_SOURCE: u32 = 128;
+
+/// Downscales `src` so its longest side is at most [`MAX_ATLAS_SOURCE`],
+/// preserving aspect ratio. Images already at or below the limit are returned
+/// unchanged.
+pub fn downscale(src: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let (w, h) = src.dimensions();
+    let longest = w.max(h);
+    if longest <= MAX_ATLAS_SOURCE {
+        return src.clone();
+    }
+    let scale = MAX_ATLAS_SOURCE as f32 / longest as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    image::imageops::resize(src, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 #[cfg(test)]                                                                                                                                                                                                    
 mod tests {                                                                                                                                                                                                     
     use super::*;                                                                                                                                                                                               
@@ -597,4 +619,28 @@ mod tests {
         assert_eq!(loaded.dimensions(), (16, 16));                                                 
         let _ = std::fs::remove_file(&tmp);
     }                                                                                                           
+
+    /// T4: downscale caps the longest side at MAX_ATLAS_SOURCE, preserving
+    /// aspect ratio; images already at or below the limit are unchanged.
+    #[test]
+    fn downscale_caps_longest_side() {
+        // Large landscape image (740x740 as in .res/avatar.jpg).
+        let big = test_face_cpu(740, 740);
+        let small = downscale(&big);
+        let (w, h) = small.dimensions();
+        assert!(w <= MAX_ATLAS_SOURCE && h <= MAX_ATLAS_SOURCE);
+        assert_eq!(w, h, "square input stays square");
+
+        // Wide image: 400x200 -> longest side 128, aspect preserved (2:1).
+        let wide = test_face_cpu(400, 200);
+        let w2 = downscale(&wide);
+        let (ww, wh) = w2.dimensions();
+        assert_eq!(ww, 128);
+        assert_eq!(wh, 64);
+
+        // Already small image is returned unchanged.
+        let tiny = test_face_cpu(64, 64);
+        let t2 = downscale(&tiny);
+        assert_eq!(t2.dimensions(), (64, 64));
+    }
 }

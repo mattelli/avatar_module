@@ -225,9 +225,13 @@ pub fn render_with_stats(
     let visemes = viseme_frames(&timings, frame_count);
 
     // 5. Atlas (CPU warping; the GPU atlas builder is exercised by task 6).
+    //    Downscale the source picture so the warp stays cheap: the atlas is
+    //    built at source resolution but only ever sampled at 32/64 px output.
     let src = match &cfg.picture {
-        Some(p) => crate::atlas::load_image(p)
-            .with_context(|| format!("load avatar {}", p.display()))?,
+        Some(p) => crate::atlas::downscale(
+            &crate::atlas::load_image(p)
+                .with_context(|| format!("load avatar {}", p.display()))?,
+        ),
         None => crate::atlas::test_face_cpu(cfg.size, cfg.size),
     };
     let atlas = crate::atlas::atlas_cpu(&src, cfg.strength);
