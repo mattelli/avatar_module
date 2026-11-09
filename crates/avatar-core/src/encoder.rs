@@ -232,9 +232,12 @@ impl AacEncoder {
         }
     }
 
-    /// Encodes f32 PCM samples to AAC frames (ADTS).
+    /// Encodes f32 PCM samples to raw AAC access units.
     ///
-    /// Returns a list of AAC access units (each 1024 samples per channel).
+    /// Returns a list of AAC access units (each 1024 samples per channel),
+    /// without ADTS headers — MP4 stores raw AAC frames and carries the
+    /// AudioSpecificConfig in the `esds` box. ADTS-wrapped samples inside an
+    /// MP4 AAC track are rejected by many decoders (silent audio).
     #[cfg(feature = "aac")]
     pub fn encode_pcm(&mut self, samples: &[f32]) -> anyhow::Result<Vec<Vec<u8>>> {
         use fdk_aac::enc::{
@@ -248,7 +251,7 @@ impl AacEncoder {
         let params = EncoderParams {
             bit_rate: BitRate::Cbr(128_000),
             sample_rate: self.sample_rate,
-            transport: Transport::Adts,
+            transport: Transport::Raw,
             channels: mode,
             audio_object_type: AudioObjectType::Mpeg4LowComplexity,
         };
@@ -597,10 +600,33 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    /// T3/T5: AAC samples are raw access units (no ADTS headers) so MP4
+    /// decoders can play them; the esds box carries the AudioSpecificConfig.
+    #[cfg(feature = "aac")]
+    #[test]
+    fn aac_samples_are_raw_not_adts() {
+        let mut enc = AacEncoder::new(22_050, 1);
+        // 0.5 s of a 440 Hz sine at 22.05 kHz.
+        let sr = 22_050u32;
+        let n = (0.5 * sr as f32) as usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / sr as f32).sin() * 0.3)
+            .collect();
+        let frames = enc.encode_pcm(&samples).unwrap();
+        assert!(!frames.is_empty(), "expected AAC frames");
+        for (i, f) in frames.iter().enumerate() {
+            assert!(
+                f.len() < 2 || f[0] != 0xFF || (f[1] & 0xF0) != 0xF0,
+                "frame {i} starts with an ADTS sync word; MP4 needs raw AAC"
+            );
+        }
+    }
+
     /// T8: muxide fallback path is not enabled; mp4 crate is the only muxer.
     #[test]
     fn muxer_selection() {
         // The plan pins `mp4` with `muxide` as fallback; we ship mp4 only.
         assert!(true);
     }
+
 }
