@@ -48,7 +48,22 @@ impl H264Encoder {
     /// Returns the raw Annex-B bitstream. SPS/PPS are extracted separately by
     /// [`extract_sps_pps`] for the MP4 `avcC` box.
     pub fn encode_rgba(&mut self, frames: &[image::ImageBuffer<Rgba<u8>, Vec<u8>>]) -> anyhow::Result<Vec<u8>> {
+        Ok(self.encode_rgba_ranges(frames)?.0)
+    }
+
+    /// Encodes a batch of RGBA frames, returning the concatenated Annex-B
+    /// bitstream plus the exact byte range `[start, end)` of each frame within
+    /// it.
+    ///
+    /// Tracking per-frame ranges lets the muxer build one MP4 sample per real
+    /// frame instead of guessing NAL counts (which misaligns sample boundaries
+    /// and causes flicker).
+    pub fn encode_rgba_ranges(
+        &mut self,
+        frames: &[image::ImageBuffer<Rgba<u8>, Vec<u8>>],
+    ) -> anyhow::Result<(Vec<u8>, Vec<(usize, usize)>)> {
         let mut out = Vec::new();
+        let mut ranges = Vec::with_capacity(frames.len());
         for frame in frames {
             let (w, h) = frame.dimensions();
             anyhow::ensure!(
@@ -57,8 +72,8 @@ impl H264Encoder {
                 self.width,
                 self.height
             );
+            let start = out.len();
             // RGBA8 → I420 (via openh264's own converter).
-            let (w, h) = frame.dimensions();
             let rgba = openh264::formats::RgbaSliceU8::new(
                 frame.as_raw(),
                 (w as usize, h as usize),
@@ -66,8 +81,9 @@ impl H264Encoder {
             let yuv = openh264::formats::YUVBuffer::from_rgb_source(rgba);
             let bitstream = self.inner.encode(&yuv)?;
             out.write_all(&bitstream.to_vec())?;
+            ranges.push((start, out.len()));
         }
-        Ok(out)
+        Ok((out, ranges))
     }
 
     /// Dimensions of the encoded video.
@@ -398,49 +414,14 @@ pub fn encode_and_mux(
     anyhow::ensure!(!frames.is_empty(), "no frames to encode");
     let (w, h) = frames[0].dimensions();
     let mut video = H264Encoder::new(w, h, FPS)?;
-    let bitstream = video.encode_rgba(frames)?;
+    // Encode once, tracking the exact byte range of each frame so the muxer
+    // can emit one MP4 sample per real frame (no NAL-count guessing).
+    let (bitstream, ranges) = video.encode_rgba_ranges(frames)?;
     let (sps, pps) = extract_sps_pps(&bitstream)?;
-    let avcc = annexb_to_avcc(&bitstream);
-    // Split AVCC stream back into per-frame samples: each frame is one
-    // length-prefixed NAL group; for simplicity we mux one sample per frame
-    // by re-splitting on the length prefixes produced per frame.
-    // encode_rgba writes one bitstream per frame contiguously, so we track
-    // per-frame boundaries by re-encoding is expensive; instead we mux the
-    // whole stream as a single sample when splitting is not possible.
-    let video_samples: Vec<Vec<u8>> = if frames.len() == 1 {
-        vec![avcc]
-    } else {
-        // Split by NAL count: each frame contributes at least one slice NAL.
-        // We approximate by distributing NALs evenly (SPS/PPS go with sample 0).
-        let nal_count = split_annexb(&bitstream).len();
-        let per = (nal_count / frames.len()).max(1);
-        let mut samples = Vec::new();
-        let mut units = split_annexb(&bitstream);
-        let mut idx = 0;
-        for f in 0..frames.len() {
-            let mut group = Vec::new();
-            let take = if f == 0 { per + 2 } else { per }; // SPS/PPS with first
-            for _ in 0..take {
-                if idx >= units.len() {
-                    break;
-                }
-                let nal = &units[idx];
-                let len = (nal.payload.len() + 1) as u32;
-                group.extend_from_slice(&len.to_be_bytes());
-                group.push(nal.header);
-                group.extend_from_slice(&nal.payload);
-                idx += 1;
-            }
-            if !group.is_empty() {
-                samples.push(group);
-            }
-        }
-        if samples.is_empty() {
-            vec![avcc]
-        } else {
-            samples
-        }
-    };
+    let video_samples: Vec<Vec<u8>> = ranges
+        .iter()
+        .map(|&(start, end)| annexb_to_avcc(&bitstream[start..end]))
+        .collect();
 
     let mut audio = AacEncoder::new(audio_sample_rate, audio_channels);
     let aac = audio.encode_pcm(audio_samples)?;
@@ -532,6 +513,55 @@ mod tests {
         // Second NAL: length 3, then 0x68 4 5.
         assert_eq!(&avcc[8..12], &[0, 0, 0, 3]);
         assert_eq!(&avcc[12..15], &[0x68, 4, 5]);
+    }
+
+    /// T3: per-frame AVCC samples match the exact encoded byte ranges.
+    #[test]
+    fn encode_ranges_produce_one_sample_per_frame() {
+        let frames = test_frames(10, 64, 64);
+        let mut enc = H264Encoder::new(64, 64, FPS).unwrap();
+        let (bitstream, ranges) = enc.encode_rgba_ranges(&frames).unwrap();
+
+        // One contiguous range per frame, covering the whole stream exactly.
+        assert_eq!(ranges.len(), frames.len());
+        assert_eq!(ranges.first().unwrap().0, 0);
+        assert_eq!(ranges.last().unwrap().1, bitstream.len());
+        for w in ranges.windows(2) {
+            assert_eq!(w[0].1, w[1].0, "ranges must be contiguous");
+            assert!(w[0].1 > w[0].0, "each frame must produce bytes");
+        }
+
+        // Each range converts to AVCC with at least one NAL.
+        let samples: Vec<Vec<u8>> = ranges
+            .iter()
+            .map(|&(a, b)| annexb_to_avcc(&bitstream[a..b]))
+            .collect();
+        assert_eq!(samples.len(), frames.len());
+        for (i, sample) in samples.iter().enumerate() {
+            assert!(!sample.is_empty(), "sample {i} must not be empty");
+            // Every sample must be a valid AVCC group: each 4-byte length
+            // prefix matches a NAL (header + payload) inside the sample.
+            let mut off = 0;
+            while off + 4 <= sample.len() {
+                let len = u32::from_be_bytes([
+                    sample[off],
+                    sample[off + 1],
+                    sample[off + 2],
+                    sample[off + 3],
+                ]) as usize;
+                assert!(
+                    off + 4 + len <= sample.len(),
+                    "sample {i}: NAL length {len} exceeds sample at offset {off}"
+                );
+                off += 4 + len;
+            }
+            assert_eq!(off, sample.len(), "sample {i}: trailing bytes");
+        }
+
+        // SPS/PPS must be extractable from the whole stream (they may live in
+        // any frame, not necessarily the first).
+        let (sps, pps) = extract_sps_pps(&bitstream).unwrap();
+        assert!(!sps.is_empty() && !pps.is_empty());
     }
 
     /// T8: full encode → MP4 parses with moov box, 2 tracks, matching durations.
