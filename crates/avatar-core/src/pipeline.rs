@@ -303,23 +303,57 @@ mod tests {
         let parsed = mp4::Mp4Reader::read_header(&mut reader, size).unwrap();
         assert_eq!(parsed.tracks().len(), 2, "expected video + audio tracks");
 
-        // Video duration ≈ audio duration ± 100 ms.
-        let audio = parsed
+        // Capture track IDs first (the reader is moved below).
+        let audio_id = parsed
             .tracks()
             .values()
             .find(|t| t.track_type().map(|tt| tt == mp4::TrackType::Audio).unwrap_or(false))
-            .unwrap();
-        let video = parsed
+            .unwrap()
+            .track_id();
+        let video_id = parsed
             .tracks()
             .values()
             .find(|t| t.track_type().map(|tt| tt == mp4::TrackType::Video).unwrap_or(false))
-            .unwrap();
-        let audio_ms = audio.duration().as_millis() as f32;
-        let video_ms = video.duration().as_millis() as f32;
+            .unwrap()
+            .track_id();
+
+        // Video duration ≈ audio duration ± 100 ms.
+        let audio_t = parsed.tracks().get(&audio_id).unwrap();
+        let video_t = parsed.tracks().get(&video_id).unwrap();
+        let audio_ms = audio_t.duration().as_millis() as f32;
+        let video_ms = video_t.duration().as_millis() as f32;
         assert!(
             (video_ms - audio_ms).abs() <= 100.0,
             "video {video_ms} ms vs audio {audio_ms} ms"
         );
+
+        // Regression (PLAN_FIX_RENDER_ISSUES): one MP4 video sample per
+        // rendered frame. The old NAL-count heuristic produced misaligned
+        // samples -> flickering video.
+        assert_eq!(
+            video_t.sample_count() as usize,
+            frames,
+            "video sample count must equal rendered frame count"
+        );
+
+        // Audio track must be non-silent when the AAC encoder is enabled.
+        #[cfg(feature = "aac")]
+        {
+            let mut parsed = parsed;
+            let n = parsed.sample_count(audio_id).unwrap();
+            assert!(n > 0, "audio track has no samples");
+            let mut any_nonzero = false;
+            for i in 1..=n {
+                if let Some(sample) = parsed.read_sample(audio_id, i).unwrap() {
+                    if sample.bytes.iter().any(|&b| b != 0) {
+                        any_nonzero = true;
+                        break;
+                    }
+                }
+            }
+            assert!(any_nonzero, "audio track is silent (AAC feature on)");
+        }
+
         let _ = std::fs::remove_file(&tmp);
     }
 

@@ -98,6 +98,12 @@ Markers: `<neutral> <happy> <mad> <angry> <sad> <surprised> <disgusted>
 See `examples/render_clip.py` for a runnable script that renders a short
 marked-up clip with the bundled test voice.
 
+> **Input pictures:** the pipeline downscales the source picture to at most
+> 128 px (longest side) before building the expression atlas, so large photos
+> are handled efficiently. The output is always 32 or 64 px regardless of the
+> input size. A picture that is mostly one color (e.g. a very light photo)
+> will produce a correspondingly flat-looking avatar.
+
 ## Plans
 
 - `plans/PLAN_AVATAR_MODULE.md` — this module (tasks 1–11)
