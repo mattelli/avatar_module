@@ -17,7 +17,9 @@ keywords = ["avatar", "tts", "lip-sync", "wgpu"]
 
 [tool.maturin]
 manifest = "crates/avatar-py/Cargo.toml"
-features = ["pyo3/extension-module"]
+# pyo3/extension-module for the abi3 cdylib; avatar-py/aac forwards the
+# FDK-AAC encoder feature so the wheel's MP4 audio track is audible.
+features = ["pyo3/extension-module", "avatar-py/aac"]
 # espeak-ng phonemization data ships inside the wheel (report §3.8, ~20 MB).
 include = [
     { path = ".res/espeak-ng-data/**", format = "sdist" },

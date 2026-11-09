@@ -52,6 +52,12 @@ maturin build --release -o dist -m crates/avatar-py/Cargo.toml
 pip install dist/live_avatar-*.whl
 ```
 
+> **AAC audio:** the wheel enables the `aac` feature (via `avatar-py/aac`),
+> which compiles the FDK-AAC encoder. The FDK-AAC source is bundled inside
+> the `fdk-aac-sys` crate and built with a C++ toolchain, so building the
+> wheel requires a C++ compiler (MSVC on Windows, `g++`/`clang++` elsewhere).
+> Without this feature the MP4 audio track is a silent placeholder.
+
 ## Resources
 
 The pipeline needs a Piper voice model (`model.onnx` + `model.onnx.json`) and
@@ -68,12 +74,9 @@ let cfg = EngineConfig::voice(".res/en_US-hfc_female-medium.onnx")
     .with_size(64)
     .with_strength(0.5);          // photo ~0.5, cartoon ~1.0
 
-let (frames, elapsed) = render_with_stats("Hello <happy> world", "out.mp4", &cfg)?;
-```
-
-## Python API
-
-```python
+let (frames, elapsed) = render_with_stats("Hello <happy>
+… [truncated, 4058 chars total] …
+hon
 import live_avatar
 
 live_avatar.version()             # crate version
@@ -100,6 +103,8 @@ marked-up clip with the bundled test voice.
 - `plans/PLAN_AVATAR_MODULE.md` — this module (tasks 1–11)
 - `plans/PLAN_LIPSYNC_TRAINING.md` — learned lip-sync model (`lipsync-train`
   placeholder crate) that will replace the deterministic viseme mapping
+- `plans/PLAN_FIX_RENDER_ISSUES.md` — fixes silent audio, flicker, and input
+  picture downscaling
 
 ## License
 

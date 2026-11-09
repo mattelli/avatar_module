@@ -12,3 +12,10 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.23", features = ["abi3-py310"] }
 avatar-core = { path = "../avatar-core" }
+
+[features]
+# Forward the FDK-AAC audio encoder into the wheel build so the MP4 audio
+# track is audible (silent placeholder otherwise). Requires a C++ toolchain
+# to compile the bundled FDK-AAC source (see fdk-aac-sys).
+default = ["aac"]
+aac = ["avatar-core/aac"]
