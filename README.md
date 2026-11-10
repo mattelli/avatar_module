@@ -64,6 +64,13 @@ The pipeline needs a Piper voice model (`model.onnx` + `model.onnx.json`) and
 espeak-ng phonemization data. Test assets live in `.res/`
 (`en_US-hfc_female-medium.onnx`); the espeak-ng data ships inside the wheel.
 
+Face detection (optional, plan 4) uses the SeetaFace frontal detector model
+`.res/seeta_fd_frontal_v1.0.bin` (BSD-2-Clause), sourced from the
+[`rustface`](https://github.com/atomashpolskiy/rustface) repository
+(`model/seeta_fd_frontal_v1.0.bin`, 1.2 MB). It ships inside the wheel so
+face-crop works out of the box; if the model is missing or detection fails,
+the pipeline falls back to using the whole picture (rendering never fails).
+
 ## Rust API
 
 ```rust

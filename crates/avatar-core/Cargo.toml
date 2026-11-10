@@ -20,6 +20,9 @@ mp4 = "0.14"
 # Async runtime for blocking on wgpu device requests in the sync pipeline.
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 
+# Face detection (SeetaFace via rustface, pure Rust, BSD-2-Clause) — plan 4.
+rustface = "0.1"
+
 # Piper TTS (embedded, in-process ONNX Runtime) — task 3.
 piper-rs = { version = "0.2", optional = true }
 espeak-rs = { version = "0.2", optional = true, default-features = false }

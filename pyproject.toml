@@ -20,8 +20,12 @@ manifest = "crates/avatar-py/Cargo.toml"
 # pyo3/extension-module for the abi3 cdylib; avatar-py/aac forwards the
 # FDK-AAC encoder feature so the wheel's MP4 audio track is audible.
 features = ["pyo3/extension-module", "avatar-py/aac"]
-# espeak-ng phonemization data ships inside the wheel (report §3.8, ~20 MB).
+# espeak-ng phonemization data ships inside the wheel (report §3.8, ~20 MB);
+# the SeetaFace face-detection model (plan 4) ships too so face-crop works
+# out of the box (fallback to whole image if it is missing).
 include = [
     { path = ".res/espeak-ng-data/**", format = "sdist" },
     { path = ".res/espeak-ng-data/**", format = "wheel" },
+    { path = ".res/seeta_fd_frontal_v1.0.bin", format = "sdist" },
+    { path = ".res/seeta_fd_frontal_v1.0.bin", format = "wheel" },
 ]
