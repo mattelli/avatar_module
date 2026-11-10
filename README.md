@@ -60,6 +60,49 @@ pip install dist/live_avatar-*.whl
 > wheel requires a C++ compiler (MSVC on Windows, `g++`/`clang++` elsewhere).
 > Without this feature the MP4 audio track is a silent placeholder.
 
+## Python environment setup
+
+The core pipeline only needs the `live_avatar` wheel (install it with
+`pip install dist/live_avatar-*.whl` after building, see above). The
+example script `examples/render_clip.py` additionally uses a few optional
+packages to **play back** the generated video (video + audio) and to dump
+individual frames as PNGs.
+
+Install everything into your Python environment with:
+
+```bash
+pip install opencv-python sounddevice soundfile imageio_ffmpeg
+```
+
+| Package | Used for | Required for |
+|---------|----------|--------------|
+| `opencv-python` (`cv2`) | video playback window, frame dumping | `examples/render_clip.py` playback / `--frame` |
+| `sounddevice` | audio playback (PortAudio) | audio while playing the clip |
+| `soundfile` | reads the extracted WAV audio | audio while playing the clip |
+| `imageio_ffmpeg` | bundled ffmpeg binary that extracts the MP4 audio track | audio while playing the clip |
+
+All four are optional and the example degrades gracefully: without `cv2` it
+renders only; without the audio trio it plays video only and prints a hint.
+
+**Using a virtual environment** (e.g. the project's `.venv`):
+
+```bash
+.venv/Scripts/python.exe -m pip install opencv-python sounddevice soundfile imageio_ffmpeg
+.venv/Scripts/python.exe examples/render_clip.py
+```
+
+**Using a system Python** that already has some of these:
+
+```bash
+python -m pip install sounddevice soundfile imageio_ffmpeg   # cv2 usually already present
+pip install dist/live_avatar-*.whl                            # the wheel itself
+python examples/render_clip.py
+```
+
+> **Note:** `live_avatar` is a separate wheel and is never pulled in by the
+> packages above — make sure it is installed in the same environment you run
+> the example from.
+
 ## Resources
 
 The pipeline needs a Piper voice model (`model.onnx` + `model.onnx.json`) and
@@ -107,7 +150,15 @@ Markers: `<neutral> <happy> <mad> <angry> <sad> <surprised> <disgusted>
 ## Example
 
 See `examples/render_clip.py` for a runnable script that renders a short
-marked-up clip with the bundled test voice.
+marked-up clip with the bundled test voice and plays it back (video + audio)
+in an OpenCV window. It needs the packages listed under
+[Python environment setup](#python-environment-setup).
+
+```bash
+python examples/render_clip.py              # render + play with audio
+python examples/render_clip.py --no-play    # render only
+python examples/render_clip.py --frame 10   # dump frame 10 as PNG
+```
 
 > **Input pictures:** the pipeline detects the face (SeetaFace via `rustface`,
 > plan 4) and center-crops the photo with a 35% margin before building the
