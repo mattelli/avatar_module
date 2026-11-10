@@ -52,24 +52,26 @@ pub fn face_model_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Detects the highest-scoring face in an RGBA image and returns its
-/// bounding box in pixel coordinates.
+/// Runs the SeetaFace detector on a grayscale conversion of `img` and
+/// returns every detection as `(bbox, score)`, sorted by descending score.
 ///
-/// Returns `None` when the model cannot be loaded, the image is too small for
-/// the detector, or no face is found. Never panics on the input image: a
-/// blank or tiny image yields `None` rather than a detector panic.
-pub fn detect_face_box(
+/// Returns an empty vec when the model cannot be loaded or the image is too
+/// small for the detector. Never panics on the input image: a blank or tiny
+/// image yields an empty vec rather than a detector panic.
+pub fn detect_faces(
     img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     model_path: &Path,
-) -> Option<rustface::Rectangle> {
+) -> Vec<(rustface::Rectangle, f64)> {
     let (w, h) = img.dimensions();
     // The detector's sliding window is at least 20 px; anything smaller
     // cannot contain a detectable face.
     if w < 20 || h < 20 {
-        return None;
+        return Vec::new();
     }
 
-    let mut detector = rustface::create_detector(&model_path.to_string_lossy()).ok()?;
+    let Ok(mut detector) = rustface::create_detector(&model_path.to_string_lossy()) else {
+        return Vec::new();
+    };
     // Tuned like the rustface demo: lower threshold for recall, 0.8 pyramid
     // step, 4 px slide for a good speed/accuracy trade-off.
     detector.set_min_face_size(20);
@@ -81,22 +83,38 @@ pub fn detect_face_box(
     let gray = image::imageops::grayscale(img);
     let data = gray.as_raw();
     let image_data = rustface::ImageData::new(data, w, h);
-    let faces = detector.detect(&image_data);
-
-    // Highest score wins; ties broken by largest area.
-    faces
+    let mut faces: Vec<(rustface::Rectangle, f64)> = detector
+        .detect(&image_data)
         .into_iter()
-        .max_by(|a, b| {
-            a.score()
-                .partial_cmp(&b.score())
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    let area_a = a.bbox().width() * a.bbox().height();
-                    let area_b = b.bbox().width() * b.bbox().height();
-                    area_a.cmp(&area_b)
-                })
-        })
-        .map(|f| *f.bbox())
+        .map(|f| (*f.bbox(), f.score()))
+        .collect();
+    // Highest score first; ties broken by largest area.
+    faces.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let area_a = a.0.width() * a.0.height();
+                let area_b = b.0.width() * b.0.height();
+                area_b.cmp(&area_a)
+            })
+    });
+    faces
+}
+
+/// Detects the highest-scoring face in an RGBA image and returns its
+/// bounding box in pixel coordinates.
+///
+/// Returns `None` when the model cannot be loaded, the image is too small for
+/// the detector, or no face is found. Never panics on the input image: a
+/// blank or tiny image yields `None` rather than a detector panic.
+pub fn detect_face_box(
+    img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    model_path: &Path,
+) -> Option<rustface::Rectangle> {
+    detect_faces(img, model_path)
+        .into_iter()
+        .next()
+        .map(|(bbox, _)| bbox)
 }
 
 /// Expands `bbox` by `margin` (a fraction of the box size) on each side and
