@@ -1,22 +1,31 @@
 """Renders a short marked-up clip with the bundled test voice and plays it
-back with OpenCV so you can visualize the generated video.
+back with OpenCV (video) + sounddevice (audio), so you can see AND hear the
+generated video.
 
 Usage (from the repo root, wheel installed):
-    .venv/Scripts/python.exe examples/render_clip.py [output.mp4] [--no-play] [--frame N] [--save-frame out.png]
+    python examples/render_clip.py [output.mp4] [--no-play] [--frame N] [--save-frame out.png]
 
 Options:
-    --no-play             render only, do not open the OpenCV playback window
+    --no-play             render only, do not open the playback window
     --frame N             dump frame N (0-based) as PNG and exit
     --save-frame out.png  dump frame N (default 0) to the given path and exit
-    --scale S             upscale displayed/dumped frames by factor S (default 1,
+    --scale S             upscale displayed/dumped frames by factor S (default 8,
                           since the output is only 32 or 64 px)
+    --no-audio            disable audio playback (video only)
 
-Requires OpenCV (cv2) for playback / frame dumping. If cv2 is not importable,
-the script falls back to rendering only and prints a hint.
+Dependencies (all optional, graceful fallback):
+    - OpenCV (cv2): video playback + frame dumping
+    - sounddevice + soundfile: audio playback
+    - imageio_ffmpeg: extracts the audio track from the MP4 (bundled ffmpeg)
+
+If cv2 is missing the script renders only. If the audio libs are missing it
+plays video only and prints a hint.
 """
 
 import argparse
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import live_avatar
@@ -26,12 +35,10 @@ MODEL = ROOT / ".res" / "en_US-hfc_female-medium.onnx"
 PICTURE = ROOT / ".res" / "generated_image_20261026-211004.png"
 
 
-def _import_cv2():
-    """Returns the cv2 module, or None if OpenCV is not installed."""
+def _import(mod: str):
+    """Returns the module `mod`, or None if it is not installed."""
     try:
-        import cv2
-
-        return cv2
+        return __import__(mod)
     except ImportError:
         return None
 
@@ -42,6 +49,28 @@ def _upscale(cv2, frame, scale: int):
         return frame
     h, w = frame.shape[:2]
     return cv2.resize(frame, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST)
+
+
+def extract_audio(imageio_ffmpeg, video: Path, wav: Path) -> bool:
+    """Extracts the audio track of `video` to `wav` (PCM 16-bit).
+
+    Returns False if the video has no audio track (ffmpeg exits non-zero).
+    """
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    r = subprocess.run(
+        [ff, "-y", "-i", str(video), "-vn", "-acodec", "pcm_s16le", str(wav)],
+        capture_output=True,
+        text=True,
+    )
+    return r.returncode == 0 and wav.exists() and wav.stat().st_size > 0
+
+
+def play_audio(sounddevice, soundfile, wav: Path, blocking: bool = True) -> None:
+    """Plays a WAV file. `blocking=False` starts playback in the background."""
+    data, sr = soundfile.read(str(wav))
+    sounddevice.play(data, sr)
+    if blocking:
+        sounddevice.wait()
 
 
 def dump_frame(cv2, video: Path, frame_index: int, out_png: Path, scale: int = 1) -> None:
@@ -63,24 +92,53 @@ def dump_frame(cv2, video: Path, frame_index: int, out_png: Path, scale: int = 1
     print(f"wrote frame {frame_index} to {out_png} ({frame.shape[1]}x{frame.shape[0]})")
 
 
-def play(cv2, video: Path, scale: int = 1) -> None:
-    """Plays `video` in an OpenCV window; press q or ESC to quit."""
+def play(cv2, video: Path, scale: int = 1, audio: bool = True) -> None:
+    """Plays `video` in an OpenCV window (and audio via sounddevice if enabled);
+    press q or ESC to quit."""
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         raise RuntimeError(f"cannot open {video} with OpenCV")
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     delay = int(1000.0 / fps)
-    print(f"playing {video} ({fps:.1f} fps, x{scale}) - press q or ESC to quit")
-    while True:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            break
-        cv2.imshow("avatar", _upscale(cv2, frame, scale))
-        key = cv2.waitKey(delay) & 0xFF
-        if key in (ord("q"), 27):  # q or ESC
-            break
-    cap.release()
-    cv2.destroyAllWindows()
+
+    # Optional audio: extract the track and start playback in the background.
+    sd = _import("sounddevice")
+    sf = _import("soundfile")
+    ioff = _import("imageio_ffmpeg")
+    wav_path = None
+    if audio and sd and sf and ioff:
+        wav_path = Path(tempfile.gettempdir()) / f"avatar_{video.stem}.wav"
+        if extract_audio(ioff, video, wav_path):
+            print(f"audio: playing {video.name} with sound ({fps:.1f} fps, x{scale}) - q/ESC quits")
+            play_audio(sd, sf, wav_path, blocking=False)
+        else:
+            print("audio: no audio track found in the MP4 (video only)")
+            wav_path = None
+    else:
+        missing = [m for m in ("sounddevice", "soundfile", "imageio_ffmpeg") if _import(m) is None]
+        print(f"playing {video.name} (video only, {fps:.1f} fps, x{scale}) - q/ESC quits")
+        if missing:
+            print(f"  (audio skipped: missing {', '.join(missing)}; pip install {' '.join(missing)})")
+
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            cv2.imshow("avatar", _upscale(cv2, frame, scale))
+            key = cv2.waitKey(delay) & 0xFF
+            if key in (ord("q"), 27):  # q or ESC
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        if sd is not None and wav_path is not None:
+            sd.stop()  # stop any still-playing audio
+        if wav_path is not None:
+            try:
+                wav_path.unlink()
+            except OSError:
+                pass
 
 
 def main() -> None:
@@ -90,6 +148,7 @@ def main() -> None:
     parser.add_argument("--frame", type=int, default=None, help="dump this frame (0-based) as PNG")
     parser.add_argument("--save-frame", default=None, help="path for the dumped frame (default: frame_N.png)")
     parser.add_argument("--scale", type=int, default=1, help="upscale factor for display/dump (default 1)")
+    parser.add_argument("--no-audio", action="store_true", help="disable audio playback")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -106,12 +165,9 @@ def main() -> None:
     frames = engine.render(text, str(out))
     print(f"wrote {frames} frames to {out}")
 
-    cv2 = _import_cv2()
+    cv2 = _import("cv2")
     if cv2 is None:
-        print(
-            "OpenCV (cv2) is not installed; skipping playback. "
-            "Install it with: pip install opencv-python"
-        )
+        print("OpenCV (cv2) is not installed; skipping playback. Install it with: pip install opencv-python")
         return
 
     if args.frame is not None:
@@ -120,7 +176,7 @@ def main() -> None:
         return
 
     if not args.no_play:
-        play(cv2, out, args.scale)
+        play(cv2, out, args.scale, audio=not args.no_audio)
 
 
 if __name__ == "__main__":
