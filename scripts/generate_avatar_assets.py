@@ -2,7 +2,7 @@
 """Generate the 28 avatar I2I assets (expressions, lip shapes, head poses, eyes).
 
 Reads a single avatar reference image and uses Stable Diffusion 1.5 + IP-Adapter
-(face) to generate a consistent set of 128x128 PNGs in `avatar_assets/`.
+(face) to generate a consistent set of squared PNGs in `avatar_assets/`.
 
 Usage:
     python scripts/generate_avatar_assets.py <reference_image> [--out DIR] [--device cpu|cuda] [--steps N] [--strength F] [--scale F] [--seed N]
@@ -22,7 +22,7 @@ from pathlib import Path
 
 REFERENCE_PROMPT_TEMPLATE = (
     "portrait photo of {subject}, front-facing, neutral expression, "
-    "mouth closed, looking at camera, even lighting, sharp focus, photorealistic, 128x128"
+    "mouth closed, looking at camera, even lighting, sharp focus, photorealistic"
 )
 
 NEGATIVE_PROMPT = (
@@ -139,6 +139,20 @@ def main() -> None:
     parser.add_argument("--subject", default=None, help="subject description; if omitted, prompted")
     args = parser.parse_args()
 
+    print("=" * 60)
+    print("Avatar asset generation — parameters")
+    print("=" * 60)
+    print(f"  reference image : {args.reference}")
+    print(f"  output dir      : {args.out}")
+    print(f"  device          : {args.device}")
+    print(f"  steps           : {args.steps}")
+    print(f"  strength        : {args.strength}")
+    print(f"  ip_adapter_scale: {args.scale}")
+    print(f"  guidance_scale  : {args.guidance}")
+    print(f"  seed            : {args.seed}")
+    print(f"  subject         : {args.subject if args.subject is not None else '(prompted below)'}")
+    print("=" * 60)
+
     if not args.reference.exists():
         sys.exit(f"reference image not found: {args.reference}")
 
@@ -155,13 +169,14 @@ def main() -> None:
     if not subject:
         sys.exit("no subject description given")
     ref_prompt = REFERENCE_PROMPT_TEMPLATE.format(subject=subject)
+    print(f"  reference prompt: {ref_prompt}")
+    print("=" * 60)
 
-    # Load reference image, center-crop to square, resize to 128x128.
+    # Load reference image, center-crop to square, resize to 256x256.
     init_image = Image.open(args.reference).convert("RGB")
     w, h = init_image.size
     side = min(w, h)
     init_image = init_image.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
-    init_image = init_image.resize((128, 128), Image.LANCZOS)
     ip_image = init_image  # same image used as IP-Adapter reference
 
     print(f"building pipeline on {device} (this downloads ~4GB on first run)...")
