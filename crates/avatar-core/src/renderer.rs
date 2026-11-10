@@ -462,4 +462,51 @@ mod tests {
         // Wrong size.                                                                                                                                                                                          
         assert!(r.render_frame(&atlas, &w, 0.0, 0.0, 0, 0, 0.0, 100).is_err());                                                                                                                                 
     }                                                                                                                                                                                                           
+
+    /// Regression (plan 4): the renderer must sample the FULL atlas band, not
+    /// just its top-left corner, when the atlas is wider than the output.
+    ///
+    /// The pipeline builds a 128x128 band atlas and renders 64x64 frames. The
+    /// shader used to normalize UVs by the ATLAS width (128), so the 64 output
+    /// pixels only covered uv in [0, 0.5] - the top-left quadrant of the source.
+    /// UVs must be normalized by the OUTPUT size.
+    #[test]
+    fn atlas_wider_than_output_samples_full_band() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let Ok(r) = rt.block_on(FrameRenderer::new()) else {
+            eprintln!("no GPU device, skipping");
+            return;
+        };
+
+        // Source: 128x128 horizontal gradient, left = red, right = blue.
+        // If the shader samples only the top-left corner, the output's right
+        // edge stays red; if it samples the full band, it becomes blue.
+        let mut src = ImageBuffer::new(128, 128);
+        for y in 0..128 {
+            for x in 0..128 {
+                let t = x as f32 / 127.0;
+                src.put_pixel(x, y, Rgba([(255.0 * (1.0 - t)) as u8, 0, (255.0 * t) as u8, 255]));
+            }
+        }
+        let atlas = atlas_cpu(&src, 0.0); // identity warp
+        let w = neutral_weights();
+        let frame = r.render_frame(&atlas, &w, 0.0, 0.0, 0, 0, 0.0, 64).unwrap();
+
+        let left = frame.get_pixel(0, 32);
+        let right = frame.get_pixel(63, 32);
+        // Left edge should be red-dominant, right edge blue-dominant.
+        assert!(
+            left[0] as u16 > right[0] as u16,
+            "left edge not redder than right: left={left:?} right={right:?}"
+        );
+        assert!(
+            right[2] as u16 > left[2] as u16,
+            "right edge not bluer than left: left={left:?} right={right:?}"
+        );
+        // The right edge must actually be blue-ish (not a red corner).
+        assert!(
+            right[2] > 150,
+            "right edge should be blue (full band sampled), got {right:?}"
+        );
+    }
 }

@@ -60,15 +60,19 @@ fn sample_band(band: u32, uv: vec2<f32>) -> vec4<f32> {
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(atlas);
-    let w = dims.x;
-    let band_h = dims.y / 7u;
-    if (gid.x >= w || gid.y >= band_h) {
+    // The output texture is `size × size`; the atlas is `w × w×7` (7 bands of
+    // `w × w`). UVs must be normalized to the OUTPUT size, not the atlas
+    // width: the atlas is wider than the output (e.g. 128 vs 64), so dividing
+    // by the atlas width would sample only the top-left corner of the source.
+    let out_dims = textureDimensions(dst);
+    let ox = out_dims.x;
+    let oy = out_dims.y;
+    if (gid.x >= ox || gid.y >= oy) {
         return;
     }
     let openness = clamp(dot(u.v0, OPEN0) + dot(u.v1, OPEN1) + dot(u.v2, OPEN2), 0.0, 1.0);
 
-    var uv = vec2<f32>(f32(gid.x) / f32(w), f32(gid.y) / f32(band_h));
+    var uv = vec2<f32>(f32(gid.x) / f32(ox), f32(gid.y) / f32(oy));
 
     // Breathing: gentle scale around the center.
     let scale = 1.0 + u.breathing * 0.008;
