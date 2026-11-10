@@ -15,6 +15,8 @@ engine = live_avatar.Engine(
     voice_model="voices/en_US-amy-medium.onnx",  # any Piper voice
     picture="portrait.png",                      # optional; synthetic face otherwise
     size=64,                                     # 32 or 64 px
+    face_crop=True,                              # center-crop to the detected face
+    face_crop_margin=0.35,                       # margin around the face box
 )
 engine.render("Hello! <happy> Great news. <sad> It is over.", "clip.mp4")
 ```
@@ -93,6 +95,8 @@ engine = live_avatar.Engine(
     size=64,                      # 32 | 64
     strength=0.5,                 # warp strength
     breath_period_secs=4.0,       # breathing cycle
+    face_crop=True,               # center-crop to the detected face
+    face_crop_margin=0.35,        # margin around the face box
 )
 frames = engine.render("Hello <happy> world", "out.mp4")  # GIL released
 ```
@@ -105,11 +109,16 @@ Markers: `<neutral> <happy> <mad> <angry> <sad> <surprised> <disgusted>
 See `examples/render_clip.py` for a runnable script that renders a short
 marked-up clip with the bundled test voice.
 
-> **Input pictures:** the pipeline downscales the source picture to at most
-> 128 px (longest side) before building the expression atlas, so large photos
-> are handled efficiently. The output is always 32 or 64 px regardless of the
-> input size. A picture that is mostly one color (e.g. a very light photo)
-> will produce a correspondingly flat-looking avatar.
+> **Input pictures:** the pipeline detects the face (SeetaFace via `rustface`,
+> plan 4) and center-crops the photo with a 35% margin before building the
+> expression atlas, so an off-center or small face is centered in the output.
+> Face-crop can be disabled with `face_crop=False` (or `with_face_crop(false)`
+> in Rust); the margin is configurable via `face_crop_margin`. If the model is
+> missing or no face is found, the whole picture is used — rendering never
+> fails. The source is then downscaled to at most 128 px (longest side) before
+> warping, so large photos are handled efficiently. The output is always 32 or
+> 64 px regardless of the input size. A picture that is mostly one color (e.g.
+> a very light photo) will produce a correspondingly flat-looking avatar.
 
 ## Plans
 

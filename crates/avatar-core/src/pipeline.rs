@@ -380,6 +380,32 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    /// T3: with `face_crop=true` and a detectable face, the atlas source is
+    /// smaller than the input and centered on the face; with `face_crop=false`
+    /// the whole image is used.
+    #[test]
+    fn face_crop_affects_atlas_source() {
+        let Some(res) = res_dir() else { return };
+        let photo = res.join("avatar.jpg");
+        if !photo.exists() {
+            return;
+        }
+        let img = crate::atlas::load_image(&photo).unwrap();
+        let (iw, ih) = img.dimensions();
+
+        // Enabled: crop to the face (smaller than input).
+        let cropped = crate::face_crop::apply_face_crop(img.clone(), true, 0.35);
+        let (cw, ch) = cropped.dimensions();
+        assert!(
+            cw < iw || ch < ih,
+            "face_crop=true should shrink the source ({cw}x{ch} vs {iw}x{ih})"
+        );
+
+        // Disabled: whole image.
+        let whole = crate::face_crop::apply_face_crop(img, false, 0.35);
+        assert_eq!(whole.dimensions(), (iw, ih));
+    }
+
     /// Expression timeline: bands switch on span starts with a fade target.
     #[test]
     fn expression_timeline_basics() {

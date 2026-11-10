@@ -22,6 +22,8 @@ def main() -> None:
         picture=str(PICTURE),
         size=64,
         strength=0.5,
+        face_crop=True,        # center-crop to the detected face
+        face_crop_margin=0.35,  # margin around the face box
     )
     text = "Hello! <happy> Great news. <sad> It is over."
     frames = engine.render(text, str(out))

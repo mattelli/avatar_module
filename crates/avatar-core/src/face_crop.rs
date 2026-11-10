@@ -283,4 +283,53 @@ mod tests {
         let (x, y, w, h) = expand_margin(&bbox, 100, 100, 10.0);
         assert_eq!((x, y, w, h), (0, 0, 100, 100));
     }
+
+    /// `apply_face_crop` with face-crop enabled crops a photo with a face to
+    /// a region smaller than the input (T3/T4).
+    #[test]
+    fn apply_face_crop_enabled_crops_photo() {
+        let Some(res) = res_dir() else { return };
+        let photo = res.join("avatar.jpg");
+        if !photo.exists() {
+            return;
+        }
+        let img = load_image(&photo).unwrap();
+        let (iw, ih) = img.dimensions();
+        let cropped = apply_face_crop(img, true, DEFAULT_FACE_CROP_MARGIN);
+        let (cw, ch) = cropped.dimensions();
+        assert!(
+            cw < iw || ch < ih,
+            "crop should be smaller than input ({cw}x{ch} vs {iw}x{ih})"
+        );
+        assert!(cw > 0 && ch > 0);
+    }
+
+    /// `apply_face_crop` with face-crop disabled returns the whole image
+    /// unchanged (T3).
+    #[test]
+    fn apply_face_crop_disabled_keeps_whole_image() {
+        let Some(res) = res_dir() else { return };
+        let photo = res.join("avatar.jpg");
+        if !photo.exists() {
+            return;
+        }
+        let img = load_image(&photo).unwrap();
+        let (iw, ih) = img.dimensions();
+        let out = apply_face_crop(img, false, DEFAULT_FACE_CROP_MARGIN);
+        assert_eq!(out.dimensions(), (iw, ih));
+    }
+
+    /// `apply_face_crop` falls back to the whole image when the model file is
+    /// missing (Q5): point AVATAR_RES_DIR at an empty dir.
+    #[test]
+    fn apply_face_crop_missing_model_keeps_whole_image() {
+        let tmp = std::env::temp_dir().join("avatar_face_crop_empty_res");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("AVATAR_RES_DIR", &tmp);
+        let img = crate::atlas::test_face_cpu(64, 64);
+        let out = apply_face_crop(img, true, DEFAULT_FACE_CROP_MARGIN);
+        std::env::remove_var("AVATAR_RES_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(out.dimensions(), (64, 64));
+    }
 }
