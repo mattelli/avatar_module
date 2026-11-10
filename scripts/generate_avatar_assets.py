@@ -104,8 +104,10 @@ def make_pipeline(device: str, torch_dtype):
     pipe.set_ip_adapter_scale(0.8)
 
     pipe = pipe.to(device)
-    if device == "cpu":
-        pipe.enable_attention_slicing()
+    # NOTE: do NOT call enable_attention_slicing() / enable_xformers... here.
+    # IP-Adapter installs its own attention processors; memory-efficient
+    # attention (slicing / xformers / SDPA) overrides them and breaks with
+    # "AttributeError: 'tuple' object has no attribute 'shape'".
     return pipe
 
 

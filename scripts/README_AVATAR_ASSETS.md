@@ -25,7 +25,7 @@ python -m venv .venv-avatar
 Then install the packages:
 
 ```bash
-pip install --upgrade pip
+python.exe -m pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU-only (no CUDA)
 # or, if you have an NVIDIA GPU with CUDA:
 # pip install torch
@@ -123,3 +123,8 @@ person. If any drift, regenerate with lower `--strength` / higher `--scale`.
 - **CUDA out of memory** → use `--device cpu`, or reduce `--steps`.
 - **Slow first run** → expected; models download once.
 - **Faces look like different people** → lower `--strength`, raise `--scale`, keep `--seed` fixed.
+- **`AttributeError: 'tuple' object has no attribute 'shape'`** → this is a known
+  diffusers + IP-Adapter incompatibility with memory-efficient attention. The script
+  intentionally does **not** call `enable_attention_slicing()` / `enable_xformers...()`
+  because IP-Adapter installs its own attention processors that those override and
+  break. If you added such a call, remove it. (See diffusers issue #9448.)
