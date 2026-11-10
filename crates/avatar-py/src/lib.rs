@@ -36,7 +36,7 @@ impl Engine {
     ///   (the matching `.onnx.json` must sit next to it).
     /// - `picture`: optional avatar picture (PNG/JPEG); a synthetic
     ///   gradient face is used when omitted.
-    /// - `size`: output size in px, 32 (default) or 64.
+    /// - `size`: output size in px, 32 (default), 64, or 128.
     /// - `strength`: expression warp strength (photos ~0.5, cartoons ~1.0).
     /// - `breath_period_secs`: breathing cycle length (default 4 s).
     /// - `face_crop`: detect the face and center-crop before atlas warping
@@ -54,9 +54,9 @@ impl Engine {
         face_crop: bool,
         face_crop_margin: f32,
     ) -> PyResult<Self> {
-        if size != 32 && size != 64 {
+        if size != 32 && size != 64 && size != 128 {
             return Err(PyValueError::new_err(format!(
-                "size must be 32 or 64, got {size}"
+                "size must be 32, 64, or 128, got {size}"
             )));
         }
         let model_path = std::path::PathBuf::from(voice_model);

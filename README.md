@@ -14,7 +14,7 @@ import live_avatar
 engine = live_avatar.Engine(
     voice_model="voices/en_US-amy-medium.onnx",  # any Piper voice
     picture="portrait.png",                      # optional; synthetic face otherwise
-    size=64,                                     # 32 or 64 px
+    size=64,                                     # 32, 64, or 128 px
     face_crop=True,                              # center-crop to the detected face
     face_crop_margin=0.35,                       # margin around the face box
 )
@@ -36,7 +36,7 @@ text ──▶ marker parser ──▶ Piper TTS ──▶ audio analysis ──
 | Analysis | `avatar-core::analysis` | 40 ms RMS frames → head bob, breathing, lip-sync features |
 | Visemes | `avatar-core::visemes` | Phoneme → 12-viseme weights (AI, E, O, MBP, FV, L, …) |
 | Atlas | `avatar-core::atlas` | 7 expression bands (neutral, happy, mad, sad, surprised, disgusted, fearful) warped from one picture |
-| Render | `avatar-core::renderer` | wgpu compute shader; 32 or 64 px frames @ 25 fps |
+| Render | `avatar-core::renderer` | wgpu compute shader; 32, 64, or 128 px frames @ 25 fps |
 | Encode | `avatar-core::encoder` | H.264 (`openh264`) + AAC (`fdk-aac` feature; silent placeholder otherwise) → MP4 (`mp4` crate) |
 | Python | `avatar-py` | PyO3 `abi3` wheel, GIL released during render |
 
@@ -135,7 +135,7 @@ live_avatar.version()             # crate version
 engine = live_avatar.Engine(
     voice_model="voices/en_US-amy-medium.onnx",
     picture=None,                 # optional PNG/JPEG
-    size=64,                      # 32 | 64
+    size=64,                      # 32 | 64 | 128
     strength=0.5,                 # warp strength
     breath_period_secs=4.0,       # breathing cycle
     face_crop=True,               # center-crop to the detected face
@@ -169,8 +169,8 @@ python examples/render_clip.py --frame 10   # dump frame 10 as PNG
 > fails. The cropped region is then center-cropped to a square (the renderer
 > requires a square atlas band, so non-square photos — e.g. wide or tall
 > images — are handled by cropping the longer axis centered) and downscaled
-> to at most 128 px (longest side) before warping. The output is always 32 or
-> 64 px regardless of the input size. A picture that is mostly one color (e.g.
+> to at most 128 px (longest side) before warping. The output is 32, 64, or
+> 128 px regardless of the input size. A picture that is mostly one color (e.g.
 > a very light photo) will produce a correspondingly flat-looking avatar.
 
 ## Plans

@@ -116,7 +116,10 @@ impl FrameRenderer {
             "viseme weights must have K = {} entries",                                                                                                                                                          
             K                                                                                                                                                                                                   
         );                                                                                                                                                                                                      
-        anyhow::ensure!(size == 32 || size == 64, "size must be 32 or 64");                                                                                                                                     
+        anyhow::ensure!(
+            size == 32 || size == 64 || size == 128,
+            "size must be 32, 64, or 128"
+        );                                                                                                                                     
                                                                                                                                                                                                                 
         // Split K weights into the three vec4s.                                                                                                                                                                
         let mut v = [0.0f32; 12];                                                                                                                                                                               
@@ -334,17 +337,17 @@ mod tests {
                                                                                                                                                                                                                 
     /// T7: renders 32 and 64 px frames with correct dimensions.                                                                                                                                                
     #[test]                                                                                                                                                                                                     
-    fn renders_32_and_64() {                                                                                                                                                                                    
-        let rt = tokio::runtime::Runtime::new().unwrap();                                                                                                                                                       
-        let Ok(r) = rt.block_on(FrameRenderer::new()) else {                                                                                                                                                    
-            eprintln!("no GPU device, skipping");                                                                                                                                                               
-            return;                                                                                                                                                                                             
-        };                                                                                                                                                                                                      
-        let w = neutral_weights();                                                                                                                                                                              
-        let f_small = r.render_frame(&build_atlas(32), &w, 0.0, 0.0, 0, 0, 0.0, 32).unwrap();                                                                                                                   
-        assert_eq!(f_small.dimensions(), (32, 32));                                                                                                                                                             
-        let f_large = r.render_frame(&build_atlas(64), &w, 0.0, 0.0, 0, 0, 0.0, 64).unwrap();                                                                                                                   
-        assert_eq!(f_large.dimensions(), (64, 64));                                                                                                                                                             
+    fn renders_32_64_128() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let Ok(r) = rt.block_on(FrameRenderer::new()) else {
+            eprintln!("no GPU device, skipping");
+            return;
+        };
+        let w = neutral_weights();
+        for size in [32u32, 64, 128] {
+            let f = r.render_frame(&build_atlas(size), &w, 0.0, 0.0, 0, 0, 0.0, size).unwrap();
+            assert_eq!(f.dimensions(), (size, size));
+        }
     }                                                                                                                                                                                                           
                                                                                                                                                                                                                 
     /// T7: output dimensions are correct and alpha is opaque.                                                                                                                                                  

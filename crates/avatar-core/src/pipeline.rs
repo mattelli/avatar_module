@@ -29,7 +29,7 @@ pub struct EngineConfig {
     pub picture: Option<PathBuf>,
     /// Warp strength (photos ~0.5, cartoons ~1.0).
     pub strength: f32,
-    /// Output size: 32 or 64 px.
+    /// Output size: 32, 64, or 128 px.
     pub size: u32,
     /// Breathing period in seconds.
     pub breath_period_secs: f32,
@@ -59,7 +59,7 @@ impl EngineConfig {
         self
     }
 
-    /// Output size (32 or 64 px).
+    /// Output size (32, 64, or 128 px).
     pub fn with_size(mut self, size: u32) -> Self {
         self.size = size;
         self

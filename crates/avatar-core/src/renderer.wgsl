@@ -8,7 +8,7 @@
 // - fade_t cross-fades between two atlas bands (~150 ms at 25 fps,
 //   computed by the pipeline glue in task 9).
 //
-// Output is size x size RGBA (32 or 64 px), one frame per dispatch.
+// Output is size x size RGBA (32, 64, or 128 px), one frame per dispatch.
 
 struct U {
     v0: vec4<f32>,

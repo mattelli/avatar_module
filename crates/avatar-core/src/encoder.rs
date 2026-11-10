@@ -15,7 +15,7 @@ use image::Rgba;
 use std::io::Write;
 use std::path::Path;
 
-/// Default output size (32 or 64 px).
+/// Default output size (32, 64, or 128 px).
 pub const DEFAULT_SIZE: u32 = 64;
 
 /// Encodes RGBA frames to H.264 (Annex B, with SPS/PPS extracted).
