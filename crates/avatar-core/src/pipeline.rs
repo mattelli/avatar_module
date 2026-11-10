@@ -33,6 +33,10 @@ pub struct EngineConfig {
     pub size: u32,
     /// Breathing period in seconds.
     pub breath_period_secs: f32,
+    /// Crop to the detected face before atlas warping (plan 4).
+    pub face_crop: bool,
+    /// Face-crop margin as a fraction of the face-box size (default 0.35).
+    pub face_crop_margin: f32,
 }
 
 impl EngineConfig {
@@ -44,6 +48,8 @@ impl EngineConfig {
             strength: 0.5,
             size: DEFAULT_SIZE,
             breath_period_secs: 4.0,
+            face_crop: true,
+            face_crop_margin: crate::face_crop::DEFAULT_FACE_CROP_MARGIN,
         }
     }
 
@@ -62,6 +68,18 @@ impl EngineConfig {
     /// Warp strength for the expression atlas.
     pub fn with_strength(mut self, strength: f32) -> Self {
         self.strength = strength;
+        self
+    }
+
+    /// Enables/disables face detection + center-crop (default enabled).
+    pub fn with_face_crop(mut self, enabled: bool) -> Self {
+        self.face_crop = enabled;
+        self
+    }
+
+    /// Sets the face-crop margin as a fraction of the face-box size.
+    pub fn with_face_crop_margin(mut self, margin: f32) -> Self {
+        self.face_crop_margin = margin;
         self
     }
 }
@@ -225,13 +243,18 @@ pub fn render_with_stats(
     let visemes = viseme_frames(&timings, frame_count);
 
     // 5. Atlas (CPU warping; the GPU atlas builder is exercised by task 6).
-    //    Downscale the source picture so the warp stays cheap: the atlas is
-    //    built at source resolution but only ever sampled at 32/64 px output.
+    //    Face-crop first (plan 4): detect the face and center-crop so the
+    //    hardcoded atlas control points align with real features. Falls back
+    //    to the whole image when disabled, the model is missing, or no face
+    //    is found. Then downscale so the warp stays cheap: the atlas is built
+    //    at source resolution but only ever sampled at 32/64 px output.
     let src = match &cfg.picture {
-        Some(p) => crate::atlas::downscale(
-            &crate::atlas::load_image(p)
-                .with_context(|| format!("load avatar {}", p.display()))?,
-        ),
+        Some(p) => {
+            let img = crate::atlas::load_image(p)
+                .with_context(|| format!("load avatar {}", p.display()))?;
+            let img = crate::face_crop::apply_face_crop(img, cfg.face_crop, cfg.face_crop_margin);
+            crate::atlas::downscale(&img)
+        }
         None => crate::atlas::test_face_cpu(cfg.size, cfg.size),
     };
     let atlas = crate::atlas::atlas_cpu(&src, cfg.strength);

@@ -15,11 +15,42 @@
 use crate::atlas::load_image;
 use image::ImageBuffer;
 use image::Rgba;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Default margin (fraction of the face-box size) added on each side so the
 /// forehead/hair/chin are not cut off.
 pub const DEFAULT_FACE_CROP_MARGIN: f32 = 0.35;
+
+/// Name of the bundled SeetaFace frontal detector model.
+pub const FACE_MODEL_FILE: &str = "seeta_fd_frontal_v1.0.bin";
+
+/// Resolves the `.res` asset directory by walking up from the crate manifest
+/// dir (works for `cargo test`, the repo layout, and the installed wheel).
+/// An explicit `AVATAR_RES_DIR` environment variable wins when set.
+pub fn res_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("AVATAR_RES_DIR") {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        let candidate = dir.join(".res");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Path to the bundled face-detection model, if present.
+pub fn face_model_path() -> Option<PathBuf> {
+    let p = res_dir()?.join(FACE_MODEL_FILE);
+    p.exists().then_some(p)
+}
 
 /// Detects the highest-scoring face in an RGBA image and returns its
 /// bounding box in pixel coordinates.
@@ -125,30 +156,37 @@ pub fn face_crop(
     })
 }
 
+/// Applies face-crop to a loaded image using the auto-resolved bundled model.
+///
+/// Returns the whole image unchanged when face-crop is disabled, the model is
+/// missing, detection fails, or no face is found — rendering never fails.
+pub fn apply_face_crop(
+    img: ImageBuffer<Rgba<u8>, Vec<u8>>,
+    enabled: bool,
+    margin: f32,
+) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    if !enabled {
+        return img;
+    }
+    let Some(model) = face_model_path() else {
+        return img;
+    };
+    match detect_face_box(&img, &model) {
+        Some(bbox) => {
+            let (w, h) = img.dimensions();
+            let (x, y, cw, ch) = expand_margin(&bbox, w, h, margin);
+            crop(&img, x, y, cw, ch)
+        }
+        None => img,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    /// Resolves `.res` by walking up from the crate root (cargo test runs
-    /// with CWD = crates/avatar-core, where `.res` does not exist).
-    fn res_dir() -> Option<PathBuf> {
-        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        loop {
-            let candidate = dir.join(".res");
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-            if !dir.pop() {
-                return None;
-            }
-        }
-    }
 
     fn model_path() -> Option<PathBuf> {
-        let dir = res_dir()?;
-        let p = dir.join("seeta_fd_frontal_v1.0.bin");
-        p.exists().then_some(p)
+        face_model_path()
     }
 
     /// Blank image: no face → `None` (and no detector panic).

@@ -24,6 +24,8 @@ struct Engine {
     strength: f32,
     size: u32,
     breath_period_secs: f32,
+    face_crop: bool,
+    face_crop_margin: f32,
 }
 
 #[pymethods]
@@ -37,14 +39,20 @@ impl Engine {
     /// - `size`: output size in px, 32 (default) or 64.
     /// - `strength`: expression warp strength (photos ~0.5, cartoons ~1.0).
     /// - `breath_period_secs`: breathing cycle length (default 4 s).
+    /// - `face_crop`: detect the face and center-crop before atlas warping
+    ///   (default True; falls back to the whole image if no face is found).
+    /// - `face_crop_margin`: crop margin as a fraction of the face-box size
+    ///   (default 0.35).
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0))]
+    #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0, face_crop=true, face_crop_margin=0.35))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
         size: u32,
         strength: f32,
         breath_period_secs: f32,
+        face_crop: bool,
+        face_crop_margin: f32,
     ) -> PyResult<Self> {
         if size != 32 && size != 64 {
             return Err(PyValueError::new_err(format!(
@@ -63,6 +71,8 @@ impl Engine {
             strength,
             size,
             breath_period_secs,
+            face_crop,
+            face_crop_margin,
         })
     }
 
@@ -78,6 +88,8 @@ impl Engine {
             strength: self.strength,
             size: self.size,
             breath_period_secs: self.breath_period_secs,
+            face_crop: self.face_crop,
+            face_crop_margin: self.face_crop_margin,
         };
         let out_path = std::path::PathBuf::from(out);
         // GIL released: the pipeline is pure native compute.
