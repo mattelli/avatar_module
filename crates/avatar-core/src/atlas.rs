@@ -484,6 +484,24 @@ pub fn downscale(src: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> ImageBuffer<Rgba<u8>, 
     image::imageops::resize(src, nw, nh, image::imageops::FilterType::Triangle)
 }
 
+/// Center-crops `src` to a square (side = min(w, h)) so the atlas band is
+/// square, which the renderer requires (`width × width×7`).
+///
+/// The crop is centered on the longer axis, so a face already centered by
+/// face-crop stays centered. Non-square images (e.g. wide photos or a
+/// non-square face crop) would otherwise produce a non-square atlas and the
+/// renderer would reject it with "atlas must be width × width×7".
+pub fn center_crop_square(src: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let (w, h) = src.dimensions();
+    let side = w.min(h);
+    if side == 0 {
+        return src.clone();
+    }
+    let x = (w - side) / 2;
+    let y = (h - side) / 2;
+    image::imageops::crop_imm(src, x, y, side, side).to_image()
+}
+
 #[cfg(test)]                                                                                                                                                                                                    
 mod tests {                                                                                                                                                                                                     
     use super::*;                                                                                                                                                                                               
@@ -642,5 +660,31 @@ mod tests {
         let tiny = test_face_cpu(64, 64);
         let t2 = downscale(&tiny);
         assert_eq!(t2.dimensions(), (64, 64));
+    }
+
+    /// Plan 4 follow-up: `center_crop_square` produces a square image and
+    /// crops the longer axis centered, so the renderer's square-atlas
+    /// requirement is satisfied without moving a centered face.
+    #[test]
+    fn center_crop_square_makes_square() {
+        // Wide: 400x200 -> 200x200, centered horizontally.
+        let wide = test_face_cpu(400, 200);
+        let sq = center_crop_square(&wide);
+        assert_eq!(sq.dimensions(), (200, 200));
+
+        // Tall: 200x400 -> 200x200, centered vertically.
+        let tall = test_face_cpu(200, 400);
+        let sq2 = center_crop_square(&tall);
+        assert_eq!(sq2.dimensions(), (200, 200));
+
+        // Already square: unchanged.
+        let sq3 = test_face_cpu(64, 64);
+        assert_eq!(center_crop_square(&sq3).dimensions(), (64, 64));
+
+        // The center pixel of the source is preserved (crop is centered).
+        let src = test_face_cpu(400, 200);
+        let center_src = src.get_pixel(200, 100);
+        let sq4 = center_crop_square(&src);
+        assert_eq!(sq4.get_pixel(100, 100), center_src);
     }
 }

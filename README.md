@@ -115,8 +115,10 @@ marked-up clip with the bundled test voice.
 > Face-crop can be disabled with `face_crop=False` (or `with_face_crop(false)`
 > in Rust); the margin is configurable via `face_crop_margin`. If the model is
 > missing or no face is found, the whole picture is used — rendering never
-> fails. The source is then downscaled to at most 128 px (longest side) before
-> warping, so large photos are handled efficiently. The output is always 32 or
+> fails. The cropped region is then center-cropped to a square (the renderer
+> requires a square atlas band, so non-square photos — e.g. wide or tall
+> images — are handled by cropping the longer axis centered) and downscaled
+> to at most 128 px (longest side) before warping. The output is always 32 or
 > 64 px regardless of the input size. A picture that is mostly one color (e.g.
 > a very light photo) will produce a correspondingly flat-looking avatar.
 

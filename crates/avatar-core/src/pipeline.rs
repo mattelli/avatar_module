@@ -246,13 +246,15 @@ pub fn render_with_stats(
     //    Face-crop first (plan 4): detect the face and center-crop so the
     //    hardcoded atlas control points align with real features. Falls back
     //    to the whole image when disabled, the model is missing, or no face
-    //    is found. Then downscale so the warp stays cheap: the atlas is built
-    //    at source resolution but only ever sampled at 32/64 px output.
+    //    is found. Then center-crop to a square (the renderer requires a
+    //    square atlas band) and downscale so the warp stays cheap: the atlas
+    //    is built at source resolution but only ever sampled at 32/64 px.
     let src = match &cfg.picture {
         Some(p) => {
             let img = crate::atlas::load_image(p)
                 .with_context(|| format!("load avatar {}", p.display()))?;
             let img = crate::face_crop::apply_face_crop(img, cfg.face_crop, cfg.face_crop_margin);
+            let img = crate::atlas::center_crop_square(&img);
             crate::atlas::downscale(&img)
         }
         None => crate::atlas::test_face_cpu(cfg.size, cfg.size),
