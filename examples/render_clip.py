@@ -33,7 +33,7 @@ import live_avatar
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / ".res" / "en_US-hfc_female-medium.onnx"
-PICTURE = ROOT / ".res" / "generated_image_20261026-211004.png"
+PICTURE = ROOT / ".res" / "avatar.jpg"
 
 
 def _import(mod: str):
