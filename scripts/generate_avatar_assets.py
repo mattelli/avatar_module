@@ -136,6 +136,7 @@ def main() -> None:
     parser.add_argument("--scale", type=float, default=0.8, help="IP-Adapter scale (default 0.8)")
     parser.add_argument("--guidance", type=float, default=7.5, help="guidance scale (default 7.5)")
     parser.add_argument("--seed", type=int, default=42, help="fixed seed for reproducibility (default 42)")
+    parser.add_argument("--size", type=int, default=512, help="output image size (default 512)")
     parser.add_argument("--subject", default=None, help="subject description; if omitted, prompted")
     args = parser.parse_args()
 
@@ -150,6 +151,7 @@ def main() -> None:
     print(f"  ip_adapter_scale: {args.scale}")
     print(f"  guidance_scale  : {args.guidance}")
     print(f"  seed            : {args.seed}")
+    print(f"  output size     : {args.size}")
     print(f"  subject         : {args.subject if args.subject is not None else '(prompted below)'}")
     print("=" * 60)
 
@@ -177,6 +179,7 @@ def main() -> None:
     w, h = init_image.size
     side = min(w, h)
     init_image = init_image.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
+    init_image = init_image.resize((args.size, args.size), Image.LANCZOS)
     ip_image = init_image  # same image used as IP-Adapter reference
 
     print(f"building pipeline on {device} (this downloads ~4GB on first run)...")
