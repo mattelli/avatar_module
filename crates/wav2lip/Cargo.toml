@@ -1,0 +1,27 @@
+[package]
+name = "wav2lip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wav2Lip lip-sync GAN inference on Burn (burn-wgpu GPU, burn-flex CPU fallback) — Plan 5"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+burn.workspace = true
+burn-wgpu = { workspace = true, optional = true }
+burn-flex = { workspace = true, optional = true }
+burn-onnx.workspace = true
+burn-store.workspace = true
+
+# Force gpu-allocator (via wgpu-hal 30 / burn-wgpu) to use windows 0.62 so the
+# DX12 backend compiles on Windows (see workspace Cargo.toml [patch] note).
+[target.'cfg(windows)'.dependencies]
+windows = "0.62"
+
+[features]
+default = ["gpu"]
+# GPU inference via burn-wgpu (DX12/Vulkan on AMD machines).
+gpu = ["dep:burn-wgpu", "burn/wgpu"]
+# CPU fallback via burn-flex.
+cpu = ["dep:burn-flex", "burn/flex"]

@@ -4,6 +4,8 @@ members = [
     "crates/avatar-core",
     "crates/avatar-py",
     "crates/lipsync-train",
+    "crates/wav2lip",
+    "crates/expnet",
 ]
 
 [workspace.package]
@@ -15,3 +17,25 @@ repository = "https://github.com/max/avatar_module"
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
+
+# Burn deep-learning stack (Plan 5 — Wav2Lip + ExpNet talking-head backend).
+# 0.22.0 is the current stable release; burn-flex (CPU) and burn-onnx (ONNX
+# import) are the supported successors of the deprecated burn-ndarray /
+# burn-import crates.
+burn = { version = "0.22", default-features = false }
+burn-wgpu = { version = "0.22", default-features = false }
+burn-flex = { version = "0.22", default-features = false }
+burn-onnx = { version = "0.22" }
+burn-store = { version = "0.22", features = ["std"] }
+
+# Windows DX12 build fix for the Burn/wgpu 30 stack.
+#
+# wgpu-hal 30 (pulled by burn-wgpu via cubecl-wgpu) uses `windows 0.62`, but
+# gpu-allocator 0.28 resolves its `windows` dep to 0.58 (to satisfy
+# gpu-allocator 0.27's <=0.58 cap, used by avatar-core's wgpu 26). The two
+# ID3D12Device types then conflict and wgpu-hal 30 fails to compile on
+# Windows. We patch gpu-allocator to a local copy that pins windows =0.62.2
+# so the DX12 backend compiles. (Vulkan is used at runtime via
+# Device::wgpu_options().graphics_api(WgpuBackend::Vulkan).)
+[patch.crates-io]
+gpu-allocator = { path = "vendor/gpu-allocator" }

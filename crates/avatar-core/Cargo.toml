@@ -27,6 +27,13 @@ rustface = "0.1"
 piper-rs = { version = "0.2", optional = true }
 espeak-rs = { version = "0.2", optional = true, default-features = false }
 
+# Plan 5 — Wav2Lip + ExpNet talking-head backend (complementary crates).
+# Optional: the classic atlas/warp path stays the default until the models
+# are wired in (task 8); enabling `talking-head` pulls in the Burn-based
+# crates.
+wav2lip = { path = "../wav2lip", optional = true }
+expnet = { path = "../expnet", optional = true }
+
 [features]
 default = ["embedded"]
 # Embedded backend: piper-rs runs the ONNX model in-process.
@@ -35,6 +42,8 @@ embedded = ["dep:piper-rs", "dep:espeak-rs"]
 subprocess = []
 # FDK-AAC encoder for the audio track (optional).
 aac = ["dep:fdk-aac"]
+# Plan 5: Wav2Lip + ExpNet talking-head backend (Burn).
+talking-head = ["dep:wav2lip", "dep:expnet"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
