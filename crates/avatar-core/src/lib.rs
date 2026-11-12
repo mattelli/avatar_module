@@ -15,6 +15,11 @@ pub mod fusion;
 #[cfg(feature = "talking-head")]
 pub mod talking_head;
 
+// Re-export the ExpNet backend types so downstream crates (avatar-py) can
+// name them without depending on expnet directly.
+#[cfg(feature = "talking-head")]
+pub use expnet::backend as expnet_backend;
+
 /// Placeholder module so the crate compiles before the first real component lands.
 pub mod placeholder {
     /// Returns the crate version.

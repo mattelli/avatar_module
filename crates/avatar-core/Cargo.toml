@@ -53,5 +53,9 @@ name = "talking_head_bench"
 required-features = ["talking-head"]
 
 [[example]]
+name = "render_talking_head_api"
+required-features = ["talking-head"]
+
+[[example]]
 name = "face_detect_debug"
 required-features = []

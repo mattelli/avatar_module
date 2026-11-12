@@ -39,6 +39,41 @@ pub struct EngineConfig {
     /// requires the `talking-head` cargo feature and the model weights in
     /// `.res/models/{wav2lip,expnet}/*.bpk` to be present (fails otherwise).
     pub talking_head: bool,
+    /// Backend override for the talking-head path (GPU/CPU/Auto). `None` =
+    /// auto-select (GPU when available, CPU otherwise). Only used when
+    /// `talking_head` is true.
+    pub backend: Option<BackendPref>,
+}
+
+/// Backend selection for the talking-head path (kept dependency-free so
+/// `EngineConfig` compiles without the `talking-head` feature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendPref {
+    /// Force the GPU (burn-wgpu).
+    Gpu,
+    /// Force the CPU (burn-flex).
+    Cpu,
+}
+
+impl BackendPref {
+    /// Parses `"auto"` -> None, `"gpu"`/`"cpu"` -> the preference.
+    pub fn parse(s: &str) -> Option<Option<Self>> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(None),
+            "gpu" | "cuda" | "vulkan" | "wgpu" => Some(Some(Self::Gpu)),
+            "cpu" | "flex" | "ndarray" => Some(Some(Self::Cpu)),
+            _ => None,
+        }
+    }
+
+    /// Maps to the expnet backend preference (talking-head builds).
+    #[cfg(feature = "talking-head")]
+    pub fn to_expnet(self) -> expnet::backend::BackendPreference {
+        match self {
+            Self::Gpu => expnet::backend::BackendPreference::Gpu,
+            Self::Cpu => expnet::backend::BackendPreference::Cpu,
+        }
+    }
 }
 
 impl EngineConfig {
@@ -53,6 +88,7 @@ impl EngineConfig {
             face_crop: true,
             face_crop_margin: crate::face_crop::DEFAULT_FACE_CROP_MARGIN,
             talking_head: false,
+            backend: None,
         }
     }
 
@@ -90,6 +126,12 @@ impl EngineConfig {
     /// (requires the `talking-head` feature + model weights).
     pub fn with_talking_head(mut self, enabled: bool) -> Self {
         self.talking_head = enabled;
+        self
+    }
+
+    /// Forces the backend for the talking-head path (GPU/CPU/Auto).
+    pub fn with_backend(mut self, backend: BackendPref) -> Self {
+        self.backend = Some(backend);
         self
     }
 }
@@ -171,12 +213,16 @@ pub fn render_with_stats(
         let fcfg = crate::fusion::FusionConfig::default()
             .with_size(crate::talking_head::TALKING_HEAD_SIZE)
             .with_strength(cfg.strength);
+        let pref = cfg
+            .backend
+            .map(BackendPref::to_expnet)
+            .unwrap_or(expnet::backend::BackendPreference::Auto);
         let clip = crate::talking_head::render_talking_head(
             &samples,
             sr,
             cfg.picture.as_deref(),
             &fcfg,
-            expnet::backend::BackendPreference::Auto,
+            pref,
         )
         .context("talking-head render")?;
         anyhow::ensure!(!clip.is_empty(), "talking-head produced no frames");

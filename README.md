@@ -214,8 +214,12 @@ python examples/render_clip.py --frame 10   # dump frame 10 as PNG
 ## Plans
 
 - `plans/PLAN_AVATAR_MODULE.md` — this module (tasks 1–11)
+- `plans/PLAN_WAV2LIP_EXPNET.md` — Wav2Lip + ExpNet talking-head backend
+  (tasks 1–11, all implemented)
 - `plans/PLAN_LIPSYNC_TRAINING.md` — learned lip-sync model (`lipsync-train`
   placeholder crate) that will replace the deterministic viseme mapping
+- `plans/PLAN_SADTALKER_SERVICE.md` — alternative SadTalker Python service
+  (not implemented; the all-Rust Wav2Lip+ExpNet path was chosen instead)
 - `plans/PLAN_FIX_RENDER_ISSUES.md` — fixes silent audio, flicker, and input
   picture downscaling
 

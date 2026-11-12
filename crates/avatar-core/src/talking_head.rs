@@ -277,4 +277,53 @@ mod tests {
             .sum();
         assert!(diff > 1e-3, "different audio should produce different frames");
     }
+
+    /// T11: end-to-end smoke — render a short talking-head clip, encode +
+    /// mux to MP4, and verify 2 tracks with video sample count == frame count.
+    /// Runs on the auto-selected backend (GPU on this machine).
+    #[test]
+    fn talking_head_mp4_smoke() {
+        if !models_present() {
+            return;
+        }
+        let sr = MODEL_SAMPLE_RATE;
+        let n = (0.12 * sr as f32) as usize; // 3 frames
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin() * 0.5)
+            .collect();
+
+        let cfg = FusionConfig::default().with_size(256);
+        let frames = render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto).unwrap();
+        assert_eq!(frames.len(), 3);
+
+        let out = std::env::temp_dir().join("avatar_t11_talking_head.mp4");
+        crate::encoder::encode_and_mux(&out, &frames, &samples, sr, 1).unwrap();
+        let size = std::fs::metadata(&out).unwrap().len();
+        assert!(size > 1000, "mp4 too small: {size}");
+
+        let f = std::fs::File::open(&out).unwrap();
+        let reader = std::io::BufReader::new(f);
+        let parsed = mp4::Mp4Reader::read_header(reader, size).unwrap();
+        assert_eq!(parsed.tracks().len(), 2, "expected video + audio tracks");
+        let video_id = parsed
+            .tracks()
+            .values()
+            .find(|t| t.track_type().map(|tt| tt == mp4::TrackType::Video).unwrap_or(false))
+            .unwrap()
+            .track_id();
+        let audio_id = parsed
+            .tracks()
+            .values()
+            .find(|t| t.track_type().map(|tt| tt == mp4::TrackType::Audio).unwrap_or(false))
+            .unwrap()
+            .track_id();
+        assert_eq!(
+            parsed.sample_count(video_id).unwrap(),
+            frames.len() as u32,
+            "video sample count must equal rendered frame count"
+        );
+        assert!(parsed.sample_count(audio_id).unwrap() > 0, "audio track empty");
+
+        let _ = std::fs::remove_file(&out);
+    }
 }

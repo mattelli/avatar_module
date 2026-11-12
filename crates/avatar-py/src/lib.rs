@@ -30,6 +30,7 @@ struct Engine {
     face_crop: bool,
     face_crop_margin: f32,
     talking_head: bool,
+    backend: Option<avatar_core::pipeline::BackendPref>,
 }
 
 #[pymethods]
@@ -52,8 +53,10 @@ impl Engine {
     /// - `talking_head`: use the Wav2Lip + ExpNet photorealistic 256×256
     ///   backend (default False; requires model weights + the `talking-head`
     ///   feature).
+    /// - `backend`: backend for the talking-head path: "auto" (default; GPU
+    ///   when available, CPU otherwise), "gpu", or "cpu".
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0, face_crop=true, face_crop_margin=0.35, talking_head=false))]
+    #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0, face_crop=true, face_crop_margin=0.35, talking_head=false, backend="auto"))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
@@ -63,6 +66,7 @@ impl Engine {
         face_crop: bool,
         face_crop_margin: f32,
         talking_head: bool,
+        backend: &str,
     ) -> PyResult<Self> {
         if size != 32 && size != 64 && size != 128 {
             return Err(PyValueError::new_err(format!(
@@ -75,6 +79,14 @@ impl Engine {
                 "voice model not found: {voice_model}"
             )));
         }
+        let backend = match avatar_core::pipeline::BackendPref::parse(backend) {
+            Some(b) => b,
+            None => {
+                return Err(PyValueError::new_err(format!(
+                    "backend must be 'auto', 'gpu', or 'cpu', got {backend}"
+                )))
+            }
+        };
         Ok(Self {
             model_path,
             picture: picture.map(std::path::PathBuf::from),
@@ -84,6 +96,7 @@ impl Engine {
             face_crop,
             face_crop_margin,
             talking_head,
+            backend,
         })
     }
 
@@ -103,6 +116,7 @@ impl Engine {
             face_crop: self.face_crop,
             face_crop_margin: self.face_crop_margin,
             talking_head: self.talking_head,
+            backend: self.backend,
         };
         let out_path = std::path::PathBuf::from(out);
         // GIL released: the pipeline is pure native compute.
