@@ -13,6 +13,11 @@ burn-wgpu = { workspace = true, optional = true }
 burn-flex = { workspace = true, optional = true }
 burn-onnx.workspace = true
 burn-store.workspace = true
+# Mel preprocessing — same librosa-compatible pipeline as SadTalker (expnet).
+expnet = { path = "../expnet" }
+# Face frames + face detection (SeetaFace via rustface).
+image = "0.25"
+rustface = "0.1"
 
 # Force gpu-allocator (via wgpu-hal 30 / burn-wgpu) to use windows 0.62 so the
 # DX12 backend compiles on Windows (see workspace Cargo.toml [patch] note).
