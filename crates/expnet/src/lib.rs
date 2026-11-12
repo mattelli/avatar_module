@@ -16,8 +16,11 @@
 //! The `ref_coeff` (source-face 3DMM expression) defaults to zeros — see
 //! [`ExpNet::with_ref_coeff`].
 
+pub mod backend;
 pub mod mel;
 pub mod model;
+
+pub use backend::{Backend, BackendPreference};
 
 use std::path::Path;
 
@@ -50,11 +53,16 @@ pub struct ExpNet {
 }
 
 impl ExpNet {
-    /// Loads the ExpNet model from a `.bpk` weight file.
-    ///
-    /// `device` selects the backend (e.g. `Device::vulkan(DeviceKind::DefaultDevice)`
-    /// from the `gpu` feature or `Device::flex()` from `cpu`).
-    pub fn new(weights: impl AsRef<Path>, device: Device) -> Result<Self> {
+    /// Loads the ExpNet model from a `.bpk` weight file, auto-selecting the
+    /// backend (GPU via burn-wgpu when available, CPU otherwise).
+    pub fn new(weights: impl AsRef<Path>) -> Result<Self> {
+        let backend = Backend::auto()?;
+        Self::with_backend(weights, &backend)
+    }
+
+    /// Loads the ExpNet model on an explicitly chosen [`Backend`].
+    pub fn with_backend(weights: impl AsRef<Path>, backend: &Backend) -> Result<Self> {
+        let device = backend.device().clone();
         let model = Model::from_file(weights.as_ref(), &device);
         let ref_coeff = [0.0f32; EXP_DIM];
         Ok(Self {
@@ -154,8 +162,8 @@ mod tests {
     #[test]
     fn expnet_runs_on_cpu() {
         let Some(weights) = res_weights() else { return };
-        let device = Device::flex();
-        let model = ExpNet::new(&weights, device).unwrap();
+        let backend = Backend::select(BackendPreference::Cpu).unwrap();
+        let model = ExpNet::with_backend(&weights, &backend).unwrap();
 
         // 1 s of 440 Hz sine at 16 kHz.
         let sr = mel::SAMPLE_RATE as usize;
@@ -177,8 +185,8 @@ mod tests {
     #[test]
     fn expnet_silence_shape() {
         let Some(weights) = res_weights() else { return };
-        let device = Device::flex();
-        let model = ExpNet::new(&weights, device).unwrap();
+        let backend = Backend::select(BackendPreference::Cpu).unwrap();
+        let model = ExpNet::with_backend(&weights, &backend).unwrap();
         let samples = vec![0.0f32; mel::SAMPLE_RATE as usize];
         let mel = mel::melspectrogram(&samples);
         let video_frames = samples.len() * super::FPS as usize / mel::SAMPLE_RATE as usize;

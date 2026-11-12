@@ -46,11 +46,19 @@ pub struct Wav2Lip {
 }
 
 impl Wav2Lip {
-    /// Loads the Wav2Lip model from a `.bpk` weight file.
-    ///
-    /// `device` selects the backend (e.g. `Device::vulkan(DeviceKind::DefaultDevice)`
-    /// from the `gpu` feature or `Device::flex()` from `cpu`).
-    pub fn new(weights: impl AsRef<Path>, device: Device) -> Result<Self> {
+    /// Loads the Wav2Lip model from a `.bpk` weight file, auto-selecting the
+    /// backend (GPU via burn-wgpu when available, CPU otherwise).
+    pub fn new(weights: impl AsRef<Path>) -> Result<Self> {
+        let backend = expnet::backend::Backend::auto()?;
+        Self::with_backend(weights, &backend)
+    }
+
+    /// Loads the Wav2Lip model on an explicitly chosen [`expnet::backend::Backend`].
+    pub fn with_backend(
+        weights: impl AsRef<Path>,
+        backend: &expnet::backend::Backend,
+    ) -> Result<Self> {
+        let device = backend.device().clone();
         let model = Model::from_file(weights.as_ref(), &device);
         Ok(Self { model, device })
     }
@@ -314,8 +322,9 @@ mod tests {
     #[test]
     fn wav2lip_runs_on_cpu() {
         let Some(weights) = weights_path() else { return };
-        let device = Device::flex();
-        let model = Wav2Lip::new(&weights, device).unwrap();
+        let backend = expnet::backend::Backend::select(expnet::backend::BackendPreference::Cpu)
+            .unwrap();
+        let model = Wav2Lip::with_backend(&weights, &backend).unwrap();
 
         let chunk = first_chunk(440.0);
         let img = ImageBuffer::from_pixel(96, 96, Rgba([128u8, 128, 128, 255]));
@@ -335,8 +344,9 @@ mod tests {
     #[test]
     fn mouth_changes_with_audio() {
         let Some(weights) = weights_path() else { return };
-        let device = Device::flex();
-        let model = Wav2Lip::new(&weights, device).unwrap();
+        let backend = expnet::backend::Backend::select(expnet::backend::BackendPreference::Cpu)
+            .unwrap();
+        let model = Wav2Lip::with_backend(&weights, &backend).unwrap();
 
         let chunk_a = first_chunk(440.0);
         let chunk_b = first_chunk(880.0);
