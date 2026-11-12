@@ -88,44 +88,55 @@ impl ExpNet {
     /// vector per frame); it is derived from the audio length in SadTalker's
     /// `parse_audio_length` (audio_len * 25 / 16000). Returns a
     /// `(video_frames, EXP_DIM)` row-major expression-coefficient sequence.
+    ///
+    /// Frames are processed in batches of `batch_size` (default 32) to
+    /// amortize per-call overhead on the GPU.
     pub fn predict(&self, mel: &MelSpectrogram, video_frames: usize) -> Result<Vec<f32>> {
+        self.predict_batched(mel, video_frames, 32)
+    }
+
+    /// As [`predict`], with an explicit batch size.
+    pub fn predict_batched(
+        &self,
+        mel: &MelSpectrogram,
+        video_frames: usize,
+        batch_size: usize,
+    ) -> Result<Vec<f32>> {
         anyhow::ensure!(mel.n_frames > 0, "empty mel spectrogram");
         anyhow::ensure!(video_frames > 0, "no video frames");
         let n_frames = video_frames;
+        let batch_size = batch_size.max(1);
 
-        // The ref vector is broadcast over frames: [n_frames, 64] and
-        // [n_frames, 1] (ratio=0, no blink).
         let mut out = Vec::with_capacity(n_frames * EXP_DIM);
 
-        for i in 0..n_frames {
-            // Build the 16-column mel window for frame i (SadTalker
-            // generate_batch.py). The mel spectrogram has ~80 frames/sec
-            // (hop 200 @ 16 kHz), while the video is 25 fps, so the mel
-            // start index for video frame i is `(i - 2) * 80 / 25`, and the
-            // 16 columns are clamped to the mel frame range.
-            let start_idx = ((i as i64 - 2) * 80 / 25).max(0) as usize;
-            let mut window = [0.0f32; N_MELS * MEL_STEP];
-            for c in 0..MEL_STEP {
-                // Clamp to the mel frame range (SadTalker clamps against
-                // `orig_mel.shape[0] - 1`, the mel frame count).
-                let src = (start_idx + c).min(mel.n_frames - 1);
-                window[c * N_MELS..(c + 1) * N_MELS]
-                    .copy_from_slice(mel.frame(src));
-            }
+        for start in (0..n_frames).step_by(batch_size) {
+            let end = (start + batch_size).min(n_frames);
+            let b = end - start;
 
-            // Inputs: [1, 1, 80, 16] mel, [1, 64] ref, [1, 1] ratio.
+            // Build [b, 1, 80, 16] mel windows.
+            let mut mel_data = Vec::with_capacity(b * N_MELS * MEL_STEP);
+            for i in start..end {
+                // SadTalker generate_batch: start_idx = (i-2) * 80/25, clamped.
+                let start_idx = ((i as i64 - 2) * 80 / 25).max(0) as usize;
+                for c in 0..MEL_STEP {
+                    let src = (start_idx + c).min(mel.n_frames - 1);
+                    mel_data.extend_from_slice(mel.frame(src));
+                }
+            }
             let mel_t: Tensor<4> = Tensor::from_data(
-                TensorData::new(window.to_vec(), [1, 1, N_MELS, MEL_STEP]),
+                TensorData::new(mel_data, [b, 1, N_MELS, MEL_STEP]),
                 &self.device,
             );
+            // ref/ratio broadcast over the batch (the model concats them with
+            // the [b, 512] mel embedding, so they must be [b, ...]).
             let ref_t: Tensor<2> = Tensor::from_data(
-                TensorData::new(self.ref_coeff.to_vec(), [1, EXP_DIM]),
+                TensorData::new(self.ref_coeff.repeat(b), [b, EXP_DIM]),
                 &self.device,
             );
             let ratio_t: Tensor<2> =
-                Tensor::from_data(TensorData::new(vec![0.0f32], [1, 1]), &self.device);
+                Tensor::from_data(TensorData::new(vec![0.0f32; b], [b, 1]), &self.device);
 
-            let out_t = self.model.forward(mel_t, ref_t, ratio_t); // [1, 64]
+            let out_t = self.model.forward(mel_t, ref_t, ratio_t); // [b, 64]
             let data = out_t.into_data();
             let arr = data.as_slice::<f32>().context("expnet output not f32")?;
             out.extend_from_slice(arr);

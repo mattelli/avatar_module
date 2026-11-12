@@ -71,7 +71,20 @@ impl Wav2Lip {
     ///   [`face_input`]); must have the same length as `mel_chunks`.
     ///
     /// Returns `[n, 3, 96, 96]` mouth patches (values 0..1).
+    ///
+    /// Chunks are processed in batches of `batch_size` (default 8) to
+    /// amortize per-call overhead on the GPU while keeping memory bounded.
     pub fn predict(&self, mel_chunks: &[MelChunk], faces: &[FaceInput]) -> Result<Vec<Vec<f32>>> {
+        self.predict_batched(mel_chunks, faces, 8)
+    }
+
+    /// As [`predict`], with an explicit batch size.
+    pub fn predict_batched(
+        &self,
+        mel_chunks: &[MelChunk],
+        faces: &[FaceInput],
+        batch_size: usize,
+    ) -> Result<Vec<Vec<f32>>> {
         anyhow::ensure!(
             mel_chunks.len() == faces.len(),
             "mel chunks ({}) and faces ({}) length mismatch",
@@ -81,27 +94,42 @@ impl Wav2Lip {
         anyhow::ensure!(!mel_chunks.is_empty(), "no input chunks");
 
         let n = mel_chunks.len();
+        let batch_size = batch_size.max(1);
         let mut out = Vec::with_capacity(n);
 
-        for i in 0..n {
-            // mel: [1, 1, 80, 16]
-            let mel_t: Tensor<4> = Tensor::from_data(
-                TensorData::new(mel_chunks[i].mel.to_vec(), [1, 1, 80, 16]),
-                &self.device,
-            );
-            // face: [1, 6, 96, 96]
+        for start in (0..n).step_by(batch_size) {
+            let end = (start + batch_size).min(n);
+            let b = end - start;
+
+            // mel: [b, 1, 80, 16]
+            let mut mel_data = Vec::with_capacity(b * 80 * 16);
+            for i in start..end {
+                mel_data.extend_from_slice(&mel_chunks[i].mel);
+            }
+            let mel_t: Tensor<4> =
+                Tensor::from_data(TensorData::new(mel_data, [b, 1, 80, 16]), &self.device);
+
+            // face: [b, 6, 96, 96]
+            let mut face_data = Vec::with_capacity(b * 6 * 96 * 96);
+            for i in start..end {
+                face_data.extend_from_slice(&faces[i].data);
+            }
             let face_t: Tensor<4> = Tensor::from_data(
                 TensorData::new(
-                    faces[i].data.to_vec(),
-                    [1, 6, IMG_SIZE as usize, IMG_SIZE as usize],
+                    face_data,
+                    [b, 6, IMG_SIZE as usize, IMG_SIZE as usize],
                 ),
                 &self.device,
             );
 
-            let out_t = self.model.forward(mel_t, face_t); // [1, 3, 96, 96]
+            let out_t = self.model.forward(mel_t, face_t); // [b, 3, 96, 96]
             let data = out_t.into_data();
             let arr = data.as_slice::<f32>().context("wav2lip output not f32")?;
-            out.push(arr.to_vec());
+            // Split the batch into per-chunk patches.
+            let per = 3 * 96 * 96;
+            for c in 0..b {
+                out.push(arr[c * per..(c + 1) * per].to_vec());
+            }
         }
 
         Ok(out)

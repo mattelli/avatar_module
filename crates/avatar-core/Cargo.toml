@@ -47,3 +47,11 @@ talking-head = ["dep:wav2lip", "dep:expnet"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[example]]
+name = "talking_head_bench"
+required-features = ["talking-head"]
+
+[[example]]
+name = "face_detect_debug"
+required-features = []
