@@ -13,6 +13,7 @@ burn-wgpu = { workspace = true, optional = true }
 burn-flex = { workspace = true, optional = true }
 burn-onnx.workspace = true
 burn-store.workspace = true
+rustfft = "6"
 
 # Force gpu-allocator (via wgpu-hal 30 / burn-wgpu) to use windows 0.62 so the
 # DX12 backend compiles on Windows (see workspace Cargo.toml [patch] note).
