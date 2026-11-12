@@ -88,6 +88,27 @@ pip install dist/live_avatar-*.whl
 > wheel requires a C++ compiler (MSVC on Windows, `g++`/`clang++` elsewhere).
 > Without this feature the MP4 audio track is a silent placeholder.
 
+### Rebuilding the wheel with the talking-head backend
+
+The **talking-head** backend (Wav2Lip + ExpNet, Plan 5) is behind the
+`talking-head` cargo feature. A wheel built **without** it only supports the
+classic atlas path — `Engine(talking_head=True)` / `render_clip.py
+--talking-head` will fail with a clear error. To use the photorealistic
+backend, rebuild the wheel with the feature (and, to hear the AAC audio
+track, keep the default `aac` feature):
+
+```bash
+# From the repo root. Requires maturin + a C++ toolchain (MSVC on Windows).
+maturin build --release -o dist -m crates/avatar-py/Cargo.toml --features talking-head
+.venv\Scripts\pip.exe install --force-reinstall dist/live_avatar-*.whl   # Windows venv
+# or: pip install --force-reinstall dist/live_avatar-*.whl
+```
+
+> The `talking-head` feature also requires the model weights
+> (`wav2lip_gan.bpk` + `expnet.bpk` under `.res/models/{wav2lip,expnet}/`)
+> and a GPU adapter for reasonable speed — see `PERF_NOTES.md`. The classic
+> path (default, no feature) stays fully self-contained.
+
 ## Python environment setup
 
 The core pipeline only needs the `live_avatar` wheel (install it with
