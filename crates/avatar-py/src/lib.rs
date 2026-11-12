@@ -29,6 +29,7 @@ struct Engine {
     breath_period_secs: f32,
     face_crop: bool,
     face_crop_margin: f32,
+    talking_head: bool,
 }
 
 #[pymethods]
@@ -46,8 +47,10 @@ impl Engine {
     ///   (default True; falls back to the whole image if no face is found).
     /// - `face_crop_margin`: crop margin as a fraction of the face-box size
     ///   (default 0.35).
+    /// - `talking_head`: use the Wav2Lip + ExpNet photorealistic backend
+    ///   (default False; requires model weights + the `talking-head` feature).
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0, face_crop=true, face_crop_margin=0.35))]
+    #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0, face_crop=true, face_crop_margin=0.35, talking_head=false))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
@@ -56,6 +59,7 @@ impl Engine {
         breath_period_secs: f32,
         face_crop: bool,
         face_crop_margin: f32,
+        talking_head: bool,
     ) -> PyResult<Self> {
         if size != 32 && size != 64 && size != 128 {
             return Err(PyValueError::new_err(format!(
@@ -76,6 +80,7 @@ impl Engine {
             breath_period_secs,
             face_crop,
             face_crop_margin,
+            talking_head,
         })
     }
 
@@ -94,6 +99,7 @@ impl Engine {
             breath_period_secs: self.breath_period_secs,
             face_crop: self.face_crop,
             face_crop_margin: self.face_crop_margin,
+            talking_head: self.talking_head,
         };
         let out_path = std::path::PathBuf::from(out);
         // GIL released: the pipeline is pure native compute.

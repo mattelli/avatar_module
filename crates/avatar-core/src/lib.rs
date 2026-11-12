@@ -8,10 +8,12 @@ pub mod renderer;
 pub mod tts;
 pub mod visemes;
 
-// Plan 5, task 6 — Wav2Lip + ExpNet fusion (only when the Burn crates are
-// enabled via the `talking-head` feature).
+// Plan 5 — Wav2Lip + ExpNet fusion (task 6) and the talking-head render path
+// (task 8), only when the Burn crates are enabled via `talking-head`.
 #[cfg(feature = "talking-head")]
 pub mod fusion;
+#[cfg(feature = "talking-head")]
+pub mod talking_head;
 
 /// Placeholder module so the crate compiles before the first real component lands.
 pub mod placeholder {

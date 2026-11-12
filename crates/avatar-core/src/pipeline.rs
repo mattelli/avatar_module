@@ -33,6 +33,12 @@ pub struct EngineConfig {
     pub face_crop: bool,
     /// Face-crop margin as a fraction of the face-box size (default 0.35).
     pub face_crop_margin: f32,
+    /// Use the Wav2Lip + ExpNet talking-head backend (Plan 5, task 8).
+    ///
+    /// When false, the classic atlas/warp path is used (default). When true,
+    /// requires the `talking-head` cargo feature and the model weights in
+    /// `.res/models/{wav2lip,expnet}/*.bpk` to be present (fails otherwise).
+    pub talking_head: bool,
 }
 
 impl EngineConfig {
@@ -46,6 +52,7 @@ impl EngineConfig {
             breath_period_secs: 4.0,
             face_crop: true,
             face_crop_margin: crate::face_crop::DEFAULT_FACE_CROP_MARGIN,
+            talking_head: false,
         }
     }
 
@@ -76,6 +83,13 @@ impl EngineConfig {
     /// Sets the face-crop margin as a fraction of the face-box size.
     pub fn with_face_crop_margin(mut self, margin: f32) -> Self {
         self.face_crop_margin = margin;
+        self
+    }
+
+    /// Enables/disables the Wav2Lip + ExpNet talking-head backend
+    /// (requires the `talking-head` feature + model weights).
+    pub fn with_talking_head(mut self, enabled: bool) -> Self {
+        self.talking_head = enabled;
         self
     }
 }
@@ -149,6 +163,32 @@ pub fn render_with_stats(
     let synth = synthesize_spans(&mut tts, &spans)?;
     let (samples, sr) = concat_samples(&synth);
     anyhow::ensure!(!samples.is_empty(), "no audio synthesized");
+
+    // 2b. Talking-head path (Plan 5, task 8): Wav2Lip + ExpNet fused frames.
+    #[cfg(feature = "talking-head")]
+    if cfg.talking_head {
+        let fcfg = crate::fusion::FusionConfig::default()
+            .with_size(cfg.size)
+            .with_strength(cfg.strength);
+        let clip = crate::talking_head::render_talking_head(
+            &samples,
+            sr,
+            cfg.picture.as_deref(),
+            &fcfg,
+            expnet::backend::BackendPreference::Auto,
+        )
+        .context("talking-head render")?;
+        anyhow::ensure!(!clip.is_empty(), "talking-head produced no frames");
+        encoder::encode_and_mux(out, &clip, &samples, sr, 1)?;
+        return Ok((clip.len(), t0.elapsed()));
+    }
+    #[cfg(not(feature = "talking-head"))]
+    if cfg.talking_head {
+        anyhow::bail!(
+            "talking_head=true requires the `talking-head` cargo feature \
+             (wav2lip + expnet burn crates)"
+        );
+    }
 
     // 3. Analysis (head bob + breathing).
     let analysis = analysis::analyze(&samples, sr, cfg.breath_period_secs);
