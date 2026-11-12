@@ -7,8 +7,11 @@
 //!     picture="portrait.png",   # optional; synthetic face otherwise
 //!     size=64,                  # 32 or 64 px
 //! )
-//! engine.render("Hello <happy> world", "out.mp4")
+//! engine.render("Hello world", "out.mp4")
 //! ```
+//!
+//! Expression markers (`<happy>`/`<sad>`/...) are stripped (Plan 5, task 7):
+//! expression is audio-driven.
 //!
 //! The render runs with the GIL released (PyO3 `allow_threads`), so Python
 //! threads keep running while WebGPU compute + encoding happen.
@@ -76,8 +79,9 @@ impl Engine {
         })
     }
 
-    /// Renders `text` (with optional `<happy>`/`<mad>`/... markers) to an
-    /// MP4 file. The GIL is released for the duration of the render.
+    /// Renders `text` to an MP4 file. Expression markers (`<happy>`/`<mad>`/...)
+    /// are stripped — expression is audio-driven. The GIL is released for the
+    /// duration of the render.
     ///
     /// Returns the number of video frames written.
     #[pyo3(name = "render")]

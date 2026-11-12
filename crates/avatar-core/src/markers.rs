@@ -1,15 +1,15 @@
-//! Marker parser (report §3.1, plan task 2).
+//! Marker stripping (report §3.1, plan task 7).
 //!
-//! Scans `<tag>` tokens in the input text and splits it into `(segment, mode)`
-//! spans. Known modes: `neutral`, `happy`, `mad`, `sad`, `surprised`,
-//! `disgusted`, `fearful`. Unknown tags are dropped silently; text without any
-//! marker becomes a single neutral span.
+//! Expression markers (`<happy>`, `<sad>`, ...) are **removed** from the
+//! pipeline: expression is fully audio-driven by ExpNet (Plan 5). The parser
+//! still consumes `<tag>` tokens (so legacy marked-up text renders as a
+//! single neutral clip), but no longer switches expression modes.
 //!
-//! Span start times are known only after TTS, so this stage only produces
-//! ordered spans; the TTS stage reports per-segment durations to build the
-//! expression timeline (task 3 / task 9).
+//! The [`Mode`] enum is kept because the expression atlas
+//! ([`crate::atlas`]) still defines 7 warp bands — the pipeline just never
+//! switches them per marker anymore.
 
-/// Expression modes supported by the renderer (task 6 atlas).
+/// Expression modes supported by the renderer (atlas bands).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     Neutral,
@@ -50,26 +50,22 @@ impl Mode {
     }
 }
 
-/// A span of text with the expression mode active for it.
+/// A span of text. Expression is audio-driven, so every span is neutral.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     /// Text of the segment (markers stripped, whitespace preserved).
     pub text: String,
-    /// Expression mode active for this segment.
+    /// Expression mode active for this segment (always [`Mode::Neutral`]).
     pub mode: Mode,
 }
 
-/// Parses `text` into `(segment, mode)` spans.
+/// Parses `text` into a single neutral span with all `<tag>` markers stripped.
 ///
-/// - `<tag>` tokens are consumed as markers; a known tag switches the mode for
-///   the following text.
-/// - Unknown tags (e.g. `<xyz>`) are dropped silently.
-/// - Text before any marker is neutral.
-/// - Empty segments (two adjacent markers) produce no span.
+/// - `<tag>` tokens are consumed as markers and dropped.
+/// - Unknown tags (e.g. `<xyz>`) are dropped silently too.
 /// - An unclosed `<` at the end of the text is treated as literal text.
+/// - Empty text (or text that is only markers) yields no span.
 pub fn parse(text: &str) -> Vec<Span> {
-    let mut spans: Vec<Span> = Vec::new();
-    let mut mode = Mode::Neutral;
     let mut buf = String::new();
     let mut chars = text.chars().peekable();
 
@@ -91,105 +87,55 @@ pub fn parse(text: &str) -> Vec<Span> {
                 tag.push(n);
                 chars.next();
             }
-            if closed {
-                // Flush the pending segment before switching mode.
-                if !buf.trim().is_empty() {
-                    spans.push(Span {
-                        text: std::mem::take(&mut buf),
-                        mode,
-                    });
-                } else {
-                    buf.clear();
-                }
-                if let Some(m) = Mode::from_tag(&tag) {
-                    mode = m;
-                }
-                // Unknown tag: dropped silently, mode unchanged.
-            } else {
+            if !closed {
                 // Unclosed '<' — literal text.
                 buf.push('<');
                 buf.push_str(&tag);
             }
+            // Closed tag: dropped silently (marker removal).
         } else {
             buf.push(c);
         }
     }
 
-    if !buf.trim().is_empty() {
-        spans.push(Span { text: buf, mode });
+    if buf.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![Span {
+            text: buf,
+            mode: Mode::Neutral,
+        }]
     }
-
-    spans
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn modes(text: &str) -> Vec<Mode> {
-        parse(text).into_iter().map(|s| s.mode).collect()
-    }
-
-    fn texts(text: &str) -> Vec<String> {
-        parse(text).into_iter().map(|s| s.text).collect()
-    }
-
-    /// T2: `"<happy> hi"` → 1 span mode=happy.
+    /// T7: `parse("Hello <happy> world <sad>")` yields a single neutral span.
     #[test]
-    fn single_marker() {
-        let spans = parse("<happy> hi");
+    fn markers_stripped_single_neutral_span() {
+        let spans = parse("Hello <happy> world <sad>");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].mode, Mode::Happy);
-        assert_eq!(spans[0].text.trim(), "hi");
+        assert_eq!(spans[0].text, "Hello  world ");
+        assert_eq!(spans[0].mode, Mode::Neutral);
     }
 
-    /// T2: `"<xyz> hi"` → unknown ignored, neutral.
-    #[test]
-    fn unknown_marker_ignored() {
-        assert_eq!(modes("<xyz> hi"), vec![Mode::Neutral]);
-        assert_eq!(texts("<xyz> hi").len(), 1);
-    }
-
-    /// T2: `"<sad> a <mad> b"` → 2 spans in order.
-    #[test]
-    fn two_spans_in_order() {
-        let spans = parse("<sad> a <mad> b");
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0], Span { text: " a ".into(), mode: Mode::Sad });
-        assert_eq!(spans[1], Span { text: " b".into(), mode: Mode::Mad });
-    }
-
-    /// T2: no markers → single neutral span.
+    /// No markers → a single neutral span with the text unchanged.
     #[test]
     fn no_markers_neutral() {
         let spans = parse("Hello world");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].mode, Mode::Neutral);
         assert_eq!(spans[0].text, "Hello world");
+        assert_eq!(spans[0].mode, Mode::Neutral);
     }
 
-    /// Adjacent markers: no empty span is emitted.
+    /// Unknown tags are also stripped (all `<...>` are markers now).
     #[test]
-    fn adjacent_markers_no_empty_span() {
-        let spans = parse("<happy><sad> hi");
+    fn unknown_marker_stripped() {
+        let spans = parse("a <xyz> b");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].mode, Mode::Sad);
-    }
-
-    /// Tags are case-insensitive.
-    #[test]
-    fn case_insensitive() {
-        assert_eq!(modes("<HAPPY> x"), vec![Mode::Happy]);
-        assert_eq!(modes("<Happy> x"), vec![Mode::Happy]);
-    }
-
-    /// All known modes parse.
-    #[test]
-    fn all_known_modes() {
-        for tag in ["neutral", "happy", "mad", "sad", "surprised", "disgusted", "fearful"] {
-            let t = format!("<{}> x", tag);
-            assert!(modes(&t)[0] != Mode::Neutral || tag == "neutral", "tag {}", tag);
-        }
+        assert_eq!(spans[0].text, "a  b");
     }
 
     /// Unclosed '<' is literal text.
@@ -205,9 +151,10 @@ mod tests {
     fn empty_input() {
         assert!(parse("").is_empty());
         assert!(parse("<happy>").is_empty());
+        assert!(parse("<happy><sad>").is_empty());
     }
 
-    /// Mode::from_tag returns None for unknown tags.
+    /// Mode::from_tag still works (atlas uses it).
     #[test]
     fn from_tag_unknown() {
         assert_eq!(Mode::from_tag("xyz"), None);

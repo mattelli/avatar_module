@@ -3,22 +3,18 @@
 //! Wires the whole pipeline: text → markers → TTS → analysis → visemes →
 //! render → encode → `.mp4`.
 //!
-//! Expression timeline: each parsed span is synthesized separately; a span's
-//! expression band is active from its segment start until the next segment
-//! starts (or the audio ends). Band switches cross-fade over ~150 ms
-//! (4 frames at 25 fps) via the renderer's `fade_t`.
+//! Expression is audio-driven (Plan 5): markers are stripped (task 7), and
+//! the renderer always uses the neutral atlas band — the old expression
+//! timeline / band switching is removed.
 
 use crate::analysis::{self, FPS};
 use crate::encoder::{self, DEFAULT_SIZE};
-use crate::markers::{self, Mode, Span};
+use crate::markers::{self, Span};
 use crate::tts::{EmbeddedPiper, SynthResult, Synthesizer};
 use crate::visemes::viseme_frames;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-/// Cross-fade duration in frames (~150 ms at 25 fps).
-const FADE_FRAMES: usize = 4;
 
 /// Configuration for the avatar engine.
 #[derive(Debug, Clone)]
@@ -84,14 +80,11 @@ impl EngineConfig {
     }
 }
 
-/// One synthesized span with its expression timeline.
+/// One synthesized span.
 #[derive(Debug, Clone)]
 struct SpanSynth {
-    mode: Mode,
     /// Start time of this span in the final clip (seconds).
     start: f32,
-    /// End time of this span (seconds).
-    end: f32,
     result: SynthResult,
 }
 
@@ -108,9 +101,7 @@ fn synthesize_spans(
             .with_context(|| format!("synthesize {:?}", span.text))?;
         let dur = result.duration();
         out.push(SpanSynth {
-            mode: span.mode,
             start: t,
-            end: t + dur,
             result,
         });
         t += dur;
@@ -129,71 +120,6 @@ fn concat_samples(synth: &[SpanSynth]) -> (Vec<f32>, u32) {
         samples.extend_from_slice(&s.result.samples);
     }
     (samples, sr)
-}
-
-/// Reciprocal of the frame rate (0.04 s).
-const FPS_RECIP: f32 = 1.0 / FPS;
-
-/// Atlas band index for an expression mode (atlas order, task 6).
-fn band_of(mode: Mode) -> u32 {
-    match mode {
-        Mode::Neutral => 0,
-        Mode::Happy => 1,
-        Mode::Mad => 2,
-        Mode::Sad => 3,
-        Mode::Surprised => 4,
-        Mode::Disgusted => 5,
-        Mode::Fearful => 6,
-    }
-}
-
-/// Expression band index per video frame, with cross-fade ramps.
-///
-/// Returns `(variant_from, variant_to, fade_t)` per frame. `fade_t` is 0
-/// except on the frame that contains a band switch, where the renderer
-/// blends `variant_from` toward `variant_to` by `fade_t` in [0, 1].
-fn expression_timeline(synth: &[SpanSynth], frame_count: usize) -> Vec<(u32, u32, f32)> {
-    let mut out = Vec::with_capacity(frame_count);
-    let step = 1.0 / FADE_FRAMES as f32;
-    // Frame-by-frame state: current band + an active cross-fade.
-    let mut current = synth
-        .first()
-        .map(|s| band_of(s.mode))
-        .unwrap_or_else(|| band_of(Mode::Neutral));
-    let (mut fade_from, mut fade_to, mut fade) =
-        (current, current, 0.0f32);
-    for frame in 0..frame_count {
-        let t0 = frame as f32 * FPS_RECIP;
-        let t1 = t0 + FPS_RECIP;
-        if fade == 0.0 {
-            // Start a fade when a different-band span starts in this frame
-            // (including exactly at the frame's start boundary).
-            for s in synth {
-                let b = band_of(s.mode);
-                if b != current
-                    && s.start > t0 - FPS_RECIP
-                    && s.start <= t1
-                {
-                    fade_from = current;
-                    fade_to = b;
-                    fade = step;
-                    break;
-                }
-            }
-        }
-        if fade > 0.0 {
-            // Ramp old → new over FADE_FRAMES (~150 ms at 25 fps).
-            out.push((fade_from, fade_to, fade.min(1.0)));
-            fade += step;
-            if fade > 1.0 {
-                current = fade_to;
-                fade = 0.0;
-            }
-        } else {
-            out.push((current, current, 0.0));
-        }
-    }
-    out
 }
 
 /// Renders the full clip: text → markers → TTS → analysis → visemes →
@@ -266,14 +192,14 @@ pub fn render_with_stats(
     let renderer = rt
         .block_on(crate::renderer::FrameRenderer::new())
         .context("GPU device")?;
-    let timeline = expression_timeline(&synth, frame_count);
+    // Expression is audio-driven (task 7): every frame uses the neutral atlas
+    // band (0) with no cross-fade.
     let mut frames: Vec<([f32; 12], f32, f32, u32, u32, f32)> = Vec::with_capacity(frame_count);
     for (frame, row) in visemes.iter().enumerate() {
         let mut w = [0.0f32; 12];
         w.copy_from_slice(row);
-        let (vf, vt, ft) = timeline[frame];
         let f = &analysis.frames[frame.min(audio_frames.saturating_sub(1))];
-        frames.push((w, f.head_bob, f.breathing, vf, vt, ft));
+        frames.push((w, f.head_bob, f.breathing, 0, 0, 0.0));
     }
     let clip = renderer.render_clip(&atlas, &frames, cfg.size)?;
 
@@ -408,52 +334,16 @@ mod tests {
         assert_eq!(whole.dimensions(), (iw, ih));
     }
 
-    /// Expression timeline: bands switch on span starts with a fade target.
-    #[test]
-    fn expression_timeline_basics() {
-        let synth = |mode: Mode, start: f32, end: f32| SpanSynth {
-            mode,
-            start,
-            end,
-            result: SynthResult {
-                samples: Vec::new(),
-                sample_rate: FPS as u32,
-                phonemes: Vec::new(),
-            },
-        };
-        // Neutral 0–0.4 s, happy 0.4–0.8 s → switch at frame 10.
-        let s = vec![synth(Mode::Neutral, 0.0, 0.4), synth(Mode::Happy, 0.4, 0.8)];
-        let timeline = expression_timeline(&s, 20);
-        assert_eq!(timeline.len(), 20);
-        assert_eq!(timeline[0].0, band_of(Mode::Neutral));
-        assert_eq!(timeline[9].0, band_of(Mode::Neutral));
-        assert_eq!(timeline[9].1, band_of(Mode::Neutral));
-        // Frame 10 contains the switch: fade starts (neutral → happy, 1/4).
-        assert_eq!(timeline[10].0, band_of(Mode::Neutral));
-        assert_eq!(timeline[10].1, band_of(Mode::Happy));
-        assert!(timeline[10].2 > 0.0, "fade_t must ramp on the switch frame");
-        assert!(timeline[10].2 < 1.0, "ramp is gradual over FADE_FRAMES");
-        // Frames 11-13 continue the ramp; frame 13 completes it.
-        assert_eq!(timeline[13].0, band_of(Mode::Neutral));
-        assert_eq!(timeline[13].1, band_of(Mode::Happy));
-        assert!((timeline[13].2 - 1.0).abs() < 1e-4, "ramp completes");
-        // After the ramp the happy band is active.
-        assert_eq!(timeline[14].0, band_of(Mode::Happy));
-        assert_eq!(timeline[19].0, band_of(Mode::Happy));
-        // No span → neutral.
-        let empty: Vec<SpanSynth> = Vec::new();
-        let t = expression_timeline(&empty, 1);
-        assert_eq!(t[0].0, band_of(Mode::Neutral));
-    }
-
-    /// Marker parser integration: unknown tags dropped, spans ordered.
+    /// T7: marker parser now strips markers into a single neutral span.
     #[test]
     fn parser_integration() {
         let spans = markers::parse("<happy> hi <xyz> <sad> a <mad> b");
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].mode, Mode::Happy);
-        assert_eq!(spans[1].mode, Mode::Sad);
-        assert_eq!(spans[2].mode, Mode::Mad);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].mode, crate::markers::Mode::Neutral);
+        // Each `<tag>` (with its leading space) is removed, leaving the
+        // surrounding whitespace: " hi " + " a " + " b" with the markers'
+        // spaces preserved.
+        assert_eq!(spans[0].text, " hi   a  b");
     }
 
     /// Per-span phoneme timings are offset into the clip timeline.
@@ -465,9 +355,7 @@ mod tests {
             end,
         };
         let s = SpanSynth {
-            mode: Mode::Neutral,
             start: 0.5,
-            end: 1.0,
             result: SynthResult {
                 samples: vec![0.0; 16],
                 sample_rate: 32,
@@ -483,6 +371,6 @@ mod tests {
             });
         }
         assert_eq!(timings[0].start, 0.5);
-        assert_eq!(timings[1].end, 1.0);
+        assert_eq!(timings[1].end, 0.5 + 0.5);
     }
 }
