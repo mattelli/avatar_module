@@ -40,15 +40,18 @@ impl Engine {
     ///   (the matching `.onnx.json` must sit next to it).
     /// - `picture`: optional avatar picture (PNG/JPEG); a synthetic
     ///   gradient face is used when omitted.
-    /// - `size`: output size in px, 32 (default), 64, or 128.
+    /// - `size`: output size in px for the classic atlas path: 32 (default),
+    ///   64, or 128. When `talking_head=True` the output is a fixed 256×256
+    ///   photorealistic clip (this value is ignored).
     /// - `strength`: expression warp strength (photos ~0.5, cartoons ~1.0).
     /// - `breath_period_secs`: breathing cycle length (default 4 s).
     /// - `face_crop`: detect the face and center-crop before atlas warping
     ///   (default True; falls back to the whole image if no face is found).
     /// - `face_crop_margin`: crop margin as a fraction of the face-box size
     ///   (default 0.35).
-    /// - `talking_head`: use the Wav2Lip + ExpNet photorealistic backend
-    ///   (default False; requires model weights + the `talking-head` feature).
+    /// - `talking_head`: use the Wav2Lip + ExpNet photorealistic 256×256
+    ///   backend (default False; requires model weights + the `talking-head`
+    ///   feature).
     #[new]
     #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0, face_crop=true, face_crop_margin=0.35, talking_head=false))]
     fn new(

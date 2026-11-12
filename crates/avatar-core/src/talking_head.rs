@@ -24,6 +24,10 @@ use crate::fusion::{FusionConfig, fuse_frame};
 /// Sample rate the Wav2Lip / ExpNet models expect.
 pub const MODEL_SAMPLE_RATE: u32 = 16_000;
 
+/// Output resolution of the talking-head clip (Plan 5 decision: photorealistic
+/// high-res 256×256).
+pub const TALKING_HEAD_SIZE: u32 = 256;
+
 /// Path to the Wav2Lip `.bpk` weights.
 pub const WAV2LIP_WEIGHTS: &str = "wav2lip_gan.bpk";
 /// Path to the ExpNet `.bpk` weights.
@@ -170,6 +174,12 @@ fn load_source_face(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G7: the talking-head output is the fixed photorealistic 256×256.
+    #[test]
+    fn output_size_is_256() {
+        assert_eq!(TALKING_HEAD_SIZE, 256);
+    }
 
     #[test]
     fn resample_identity() {

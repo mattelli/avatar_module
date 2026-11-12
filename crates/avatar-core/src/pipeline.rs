@@ -164,11 +164,12 @@ pub fn render_with_stats(
     let (samples, sr) = concat_samples(&synth);
     anyhow::ensure!(!samples.is_empty(), "no audio synthesized");
 
-    // 2b. Talking-head path (Plan 5, task 8): Wav2Lip + ExpNet fused frames.
+    // 2b. Talking-head path (Plan 5, tasks 8-9): Wav2Lip + ExpNet fused
+    //    frames at the fixed high-res 256×256 output (user decision G7).
     #[cfg(feature = "talking-head")]
     if cfg.talking_head {
         let fcfg = crate::fusion::FusionConfig::default()
-            .with_size(cfg.size)
+            .with_size(crate::talking_head::TALKING_HEAD_SIZE)
             .with_strength(cfg.strength);
         let clip = crate::talking_head::render_talking_head(
             &samples,

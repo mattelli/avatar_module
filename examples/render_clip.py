@@ -1,6 +1,8 @@
-"""Renders a short marked-up clip with the bundled test voice and plays it
-back with OpenCV (video) + sounddevice (audio), so you can see AND hear the
-generated video.
+"""Renders a short clip with the bundled test voice and plays it back with
+OpenCV (video) + sounddevice (audio), so you can see AND hear the generated
+video. Expression markers are stripped (expression is audio-driven); the
+Wav2Lip + ExpNet photorealistic 256x256 backend is available via
+--talking-head.
 
 Usage (from the repo root, wheel installed):
     python examples/render_clip.py [output.mp4] [--no-play] [--frame N] [--save-frame out.png]
@@ -9,10 +11,11 @@ Options:
     --no-play             render only, do not open the playback window
     --frame N             dump frame N (0-based) as PNG and exit
     --save-frame out.png  dump frame N (default 0) to the given path and exit
-    --scale S             upscale displayed/dumped frames by factor S (default 8,
-                          since the output is only 32, 64, or 128 px)
+    --scale S             upscale displayed/dumped frames by factor S (default 1)
     --no-audio            disable audio playback (video only)
-    --size N              output size in px: 32, 64, or 128 (default 64)
+    --size N              classic atlas output size in px: 32, 64, or 128
+                          (default 128; ignored with --talking-head)
+    --talking-head        use the Wav2Lip + ExpNet 256x256 backend
 
 Dependencies (all optional, graceful fallback):
     - OpenCV (cv2): video playback + frame dumping
@@ -150,7 +153,8 @@ def main() -> None:
     parser.add_argument("--save-frame", default=None, help="path for the dumped frame (default: frame_N.png)")
     parser.add_argument("--scale", type=int, default=1, help="upscale factor for display/dump (default 1)")
     parser.add_argument("--no-audio", action="store_true", help="disable audio playback")
-    parser.add_argument("--size", type=int, default=128, choices=[32, 64, 128], help="output size in px (default 128)")
+    parser.add_argument("--size", type=int, default=128, choices=[32, 64, 128], help="classic atlas output size in px (default 128; ignored with --talking-head)")
+    parser.add_argument("--talking-head", action="store_true", help="use the Wav2Lip + ExpNet photorealistic 256x256 backend (requires model weights)")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -162,8 +166,9 @@ def main() -> None:
         strength=0.5,
         face_crop=True,        # center-crop to the detected face
         face_crop_margin=0.35,  # margin around the face box
+        talking_head=args.talking_head,
     )
-    text = "Hello! <happy> Great news. <sad> It is over."
+    text = "Hello world. Great news. It is over."  # markers are stripped; audio-driven expression
     frames = engine.render(text, str(out))
     print(f"wrote {frames} frames to {out}")
 
