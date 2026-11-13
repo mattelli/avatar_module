@@ -19,3 +19,6 @@ avatar-core = { path = "../avatar-core" }
 # to compile the bundled FDK-AAC source (see fdk-aac-sys).
 default = ["aac"]
 aac = ["avatar-core/aac"]
+# Forward the Wav2Lip + ExpNet talking-head backend into the wheel build
+# (Plan 5). Requires the model weights + a GPU for reasonable speed.
+talking-head = ["avatar-core/talking-head"]
