@@ -6,6 +6,7 @@ members = [
     "crates/wav2lip",
     "crates/expnet",
     "crates/pose",
+    "crates/pfld",
 ]
 
 [workspace.package]
