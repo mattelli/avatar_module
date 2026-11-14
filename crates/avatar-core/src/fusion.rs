@@ -5,8 +5,9 @@
 //! - **ExpNet** supplies 3DMM-style expression coefficients (64 per frame)
 //!   that drive the *non-lip* facial motion (brows, eyes, mouth corners,
 //!   cheeks) — the audio-driven expression deformation.
-//! - **Wav2Lip** supplies a precise 96×96 mouth patch re-rendered to match
-//!   the speech — the *lip articulation*.
+//! - **Wav2Lip** supplies a re-rendered 96×96 face whose mouth matches the
+//!   speech — the *lip articulation*. (Wav2Lip outputs a full face; only its
+//!   mouth sub-rectangle is used.)
 //!
 //! The fusion is:
 //!
@@ -18,9 +19,11 @@
 //! 2. **Pose warp** (Plan 6, task 6): the Audio2Pose head-pose coefficients
 //!    (yaw/pitch/roll + tx/ty/tz) are mapped to a 2D affine warp (rotate +
 //!    slight scale/translate) applied to the expression-warped frame.
-//! 3. **Mouth blend**: the Wav2Lip mouth patch is alpha-blended into the
-//!    lower-face region of the warped frame through a smooth elliptical
-//!    mask, so the precise lips replace the atlas's deterministic mouth.
+//! 3. **Mouth blend**: the mouth sub-rectangle of the Wav2Lip face is
+//!    alpha-blended into the lower-face region of the warped frame through a
+//!    smooth elliptical mask ([`RegionBlend`]), so the precise lips replace
+//!    the atlas's deterministic mouth while the source keeps its expression
+//!    and head pose.
 //!
 //! The output is the photorealistic talking-head frame at the configured
 //! resolution (task 9 sets it to the source-image size; 256×256 per the
@@ -164,45 +167,88 @@ fn face_points_neutral() -> Vec<ControlPoint> {
     ]
 }
 
-/// Blends a Wav2Lip mouth patch into the lower-face region of `frame`.
+/// A source→destination region blend: take a sub-rectangle of a source patch
+/// and alpha-blend it (through a feathered ellipse) into a rectangle of the
+/// frame. Both rectangles are normalized (0..1) so they scale with the frame.
 ///
-/// The patch (`[3, 96, 96]` channel-major, values 0..1) is resized to the mask
-/// region of the frame and alpha-blended through a smooth elliptical mask
-/// centered on the mouth. Returns a new frame.
-pub fn blend_mouth(
+/// This is the general primitive behind [`blend_mouth`]; other facial regions
+/// (e.g. eyes for blinking) can be added by defining further regions once a
+/// model produces imagery for them.
+#[derive(Debug, Clone, Copy)]
+pub struct RegionBlend {
+    /// Source sub-rectangle `[x0, y0, x1, y1]` (normalized) of the patch.
+    pub src: [f32; 4],
+    /// Destination rectangle `[x0, y0, x1, y1]` (normalized) of the frame.
+    pub dst: [f32; 4],
+    /// Feather of the elliptical mask (0 = hard edge, 1 = fully soft).
+    pub feather: f32,
+}
+
+impl RegionBlend {
+    /// The mouth region: the lower-center of the Wav2Lip 96×96 face blended
+    /// into the bottom-center of the frame.
+    ///
+    /// Wav2Lip outputs a **full face**, not a mouth-only patch, so we take the
+    /// mouth sub-rectangle of that face (the lower-center third) and blend only
+    /// that in — the rest of the source frame (with its expression/pose warp)
+    /// is kept.
+    pub fn mouth(cfg: &FusionConfig) -> Self {
+        let w = cfg.mouth_mask_width.clamp(0.0, 1.0);
+        let h = cfg.mouth_mask_height.clamp(0.0, 1.0);
+        let x0 = (1.0 - w) / 2.0;
+        Self {
+            // Mouth sub-rectangle of the 96×96 Wav2Lip face (lower-center).
+            src: [0.25, 0.60, 0.75, 1.0],
+            // Bottom-center of the frame (centered horizontally, anchored down).
+            dst: [x0, 1.0 - h, x0 + w, 1.0],
+            feather: cfg.mask_feather,
+        }
+    }
+}
+
+/// Blends a sub-rectangle of `patch_img` into `frame` through a feathered
+/// ellipse, per `region`. Returns a new frame.
+pub fn blend_region(
     frame: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    mouth_patch: &[f32],
-    cfg: &FusionConfig,
+    patch_img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    region: &RegionBlend,
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let (fw, fh) = frame.dimensions();
-    let mask_w = (fw as f32 * cfg.mouth_mask_width) as u32;
-    let mask_h = (fh as f32 * cfg.mouth_mask_height) as u32;
-    let mask_w = mask_w.max(1);
-    let mask_h = mask_h.max(1);
-    // Centered horizontally, anchored at the bottom (mouth region).
-    let x0 = (fw - mask_w) / 2;
-    let y0 = fh - mask_h;
+    let (pw, ph) = patch_img.dimensions();
 
-    // Resize the 96×96 patch to the mask region.
-    let patch_img = patch_to_image(mouth_patch); // 96x96 Rgba
-    let resized = image::imageops::resize(
-        &patch_img,
-        mask_w,
-        mask_h,
-        image::imageops::FilterType::Triangle,
-    );
+    // Source crop (clamped to the patch).
+    let sx0 = (region.src[0].clamp(0.0, 1.0) * pw as f32) as u32;
+    let sy0 = (region.src[1].clamp(0.0, 1.0) * ph as f32) as u32;
+    let sx1 = ((region.src[2].clamp(0.0, 1.0) * pw as f32).ceil() as u32).min(pw);
+    let sy1 = ((region.src[3].clamp(0.0, 1.0) * ph as f32).ceil() as u32).min(ph);
+    let sx1 = sx1.max(sx0 + 1).min(pw);
+    let sy1 = sy1.max(sy0 + 1).min(ph);
+    let crop = image::imageops::crop_imm(patch_img, sx0, sy0, sx1 - sx0, sy1 - sy0).to_image();
+
+    // Destination rectangle (clamped to the frame).
+    let dx0 = (region.dst[0].clamp(0.0, 1.0) * fw as f32) as u32;
+    let dy0 = (region.dst[1].clamp(0.0, 1.0) * fh as f32) as u32;
+    let dx1 = ((region.dst[2].clamp(0.0, 1.0) * fw as f32).ceil() as u32).min(fw);
+    let dy1 = ((region.dst[3].clamp(0.0, 1.0) * fh as f32).ceil() as u32).min(fh);
+    let dw = dx1.saturating_sub(dx0).max(1);
+    let dh = dy1.saturating_sub(dy0).max(1);
+
+    let resized = image::imageops::resize(&crop, dw, dh, image::imageops::FilterType::Triangle);
 
     let mut out = frame.clone();
-    let feather = cfg.mask_feather.clamp(0.0, 1.0);
-    let cx = x0 as f32 + mask_w as f32 / 2.0;
-    let cy = y0 as f32 + mask_h as f32 / 2.0;
-    let rx = mask_w as f32 / 2.0;
-    let ry = mask_h as f32 / 2.0;
+    let feather = region.feather.clamp(0.0, 1.0);
+    let cx = dx0 as f32 + dw as f32 / 2.0;
+    let cy = dy0 as f32 + dh as f32 / 2.0;
+    let rx = dw as f32 / 2.0;
+    let ry = dh as f32 / 2.0;
 
-    for y in 0..mask_h {
-        for x in 0..mask_w {
-            let fx = x0 + x;
-            let fy = y0 + y;
+    for y in 0..dh {
+        for x in 0..dw {
+            let fx = dx0 + x;
+            let fy = dy0 + y;
+            if fx >= fw || fy >= fh {
+                continue;
+            }
             // Normalized distance inside the ellipse (0 center, 1 edge).
             let nx = (fx as f32 - cx) / rx;
             let ny = (fy as f32 - cy) / ry;
@@ -221,14 +267,28 @@ pub fn blend_mouth(
             };
             let p = resized.get_pixel(x, y);
             let dst = out.get_pixel_mut(fx, fy);
-            let a = alpha;
             for c in 0..3 {
-                let blend = p[c] as f32 * a + dst[c] as f32 * (1.0 - a);
+                let blend = p[c] as f32 * alpha + dst[c] as f32 * (1.0 - alpha);
                 dst[c] = blend.clamp(0.0, 255.0) as u8;
             }
         }
     }
     out
+}
+
+/// Blends the Wav2Lip mouth patch into the lower-face region of `frame`.
+///
+/// The patch (`[3, 96, 96]` channel-major, values 0..1) is a **full face**; its
+/// mouth sub-rectangle is cropped, resized to the mouth mask region of the
+/// frame, and alpha-blended through a smooth elliptical mask. Returns a new
+/// frame.
+pub fn blend_mouth(
+    frame: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    mouth_patch: &[f32],
+    cfg: &FusionConfig,
+) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let patch_img = patch_to_image(mouth_patch); // 96x96 Rgba (full face)
+    blend_region(frame, &patch_img, &RegionBlend::mouth(cfg))
 }
 
 /// Converts a flat `[3, 96, 96]` (channel-major, CHW) mouth patch with values
@@ -524,6 +584,48 @@ mod tests {
             "R plane should map to the red channel (got {:?}); \
              interleaved indexing would mix the planes",
             p
+        );
+    }
+
+    /// Option B: only the mouth sub-rectangle of the Wav2Lip face is blended.
+    /// A patch whose *upper* region (face/eyes) is bright red but whose *mouth*
+    /// region is dark must NOT paint the frame red outside the mouth mask —
+    /// i.e. the whole face is not squashed into the mouth region.
+    #[test]
+    fn only_mouth_subrect_of_patch_is_blended() {
+        // White source frame so any red bleed is obvious.
+        let src = ImageBuffer::from_pixel(128, 128, Rgba([255u8, 255, 255, 255]));
+        let cfg = FusionConfig::default().with_size(128);
+        let neutral = [0.0f32; 64];
+
+        const PLANE: usize = 96 * 96;
+        let mut patch = vec![0.0f32; 3 * PLANE];
+        // Upper 60% of the face (rows 0..57) = bright red in the R plane.
+        for y in 0..57usize {
+            for x in 0..96usize {
+                patch[y * 96 + x] = 1.0;
+            }
+        }
+
+        let out = fuse_frame(&src, &neutral, None, &patch, &cfg);
+        let (fw, fh) = out.dimensions();
+
+        // The mouth region (bottom-center) takes the patch's *mouth* sub-rect,
+        // which is dark here -> the frame goes dark there (not red).
+        let mouth = out.get_pixel(fw / 2, (fh as f32 * 0.9) as u32);
+        assert!(
+            mouth[0] < 60,
+            "mouth region should take the patch's dark mouth sub-rect, got {:?}",
+            mouth
+        );
+
+        // The upper face (eyes/brows) must be untouched white — the patch's
+        // upper red region must not leak in.
+        let eyes = out.get_pixel(fw / 2, (fh as f32 * 0.4) as u32);
+        assert!(
+            eyes[0] > 200 && eyes[1] > 200 && eyes[2] > 200,
+            "upper face should be untouched, got {:?}",
+            eyes
         );
     }
 }
