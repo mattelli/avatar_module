@@ -30,25 +30,31 @@ Write-Host "`n== Step 3: ONNX -> Burn .bpk =="
 $WavOut = Join-Path $Res "models\wav2lip"
 $ExpOut = Join-Path $Res "models\expnet"
 $PoseOut = Join-Path $Res "models\pose"
-New-Item -ItemType Directory -Force -Path $WavOut, $ExpOut, $PoseOut | Out-Null
+$PfldOut = Join-Path $Res "models\pfld"
+New-Item -ItemType Directory -Force -Path $WavOut, $ExpOut, $PoseOut, $PfldOut | Out-Null
 onnx2burn (Join-Path $Res "wav2lip_gan.onnx") $WavOut | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "onnx2burn wav2lip failed" }
 onnx2burn (Join-Path $Res "expnet.onnx") $ExpOut | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "onnx2burn expnet failed" }
 onnx2burn (Join-Path $Res "pose.onnx") $PoseOut | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "onnx2burn pose failed" }
+onnx2burn (Join-Path $Res "pfld.onnx") $PfldOut | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "onnx2burn pfld failed" }
 
 Write-Host "`n== Step 4: checksums =="
 $Checksums = @(
     "wav2lip_gan.pth",
     "auido2exp_00300-model.pth",
     "auido2pose_00140-model.pth",
+    "pfld_checkpoint.pth.tar",
     "wav2lip_gan.onnx",
     "expnet.onnx",
     "pose.onnx",
+    "pfld.onnx",
     "models\wav2lip\wav2lip_gan.bpk",
     "models\expnet\expnet.bpk",
-    "models\pose\pose.bpk"
+    "models\pose\pose.bpk",
+    "models\pfld\pfld.bpk"
 )
 $lines = foreach ($f in $Checksums) {
     $p = Join-Path $Res $f

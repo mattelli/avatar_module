@@ -72,6 +72,12 @@ cargo install burn-onnx --version 0.22.0 --locked
   to a single default class (0) and `ref` to zeros (neutral start). The
   `z` latent is an explicit input so the runtime can seed it for
   determinism or sample it for stochastic renders.
+- **PFLD**: the backbone is exported with two outputs — `out1` (a feature map,
+  used only by the training-time auxiliary pose head) and `landmarks`
+  (`[1,196]` = 98 × (x,y), normalized 0..1). Inference uses only `landmarks`.
+  Note the released checkpoint contains a `bn8` parameter that the upstream
+  `forward` never uses; the inlined architecture declares it so
+  `load_state_dict` accepts the checkpoint.
 - **Windows DX12**: see the workspace `Cargo.toml` `[patch.crates-io]`
   note for the `gpu-allocator`/`windows` version fix.
 
