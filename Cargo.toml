@@ -14,6 +14,17 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/max/avatar_module"
 
+# Test profile: disable debuginfo for test binaries.
+#
+# The avatar-core test binary links piper-rs, espeak, onnxruntime, burn-wgpu,
+# openh264, wav2lip, expnet, ... — a very large link unit. With default
+# debuginfo, link.exe (MSVC 14.44) deterministically fails with
+# `LNK1000: Internal error during LIB::Search` / 0xc0000006
+# (STATUS_IN_PAGE_ERROR). `debug = false` shrinks the objects/PDBs enough for
+# the linker to succeed.
+[profile.test]
+debug = false
+
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"

@@ -15,7 +15,10 @@
 //!    face is warped with `atlas::warp_cpu`. The residual / low-frequency
 //!    coefficients drive the coarse expression; we use a small projection to
 //!    the 7-parameter mouth/brow/eye/chin motion.
-//! 2. **Mouth blend**: the Wav2Lip mouth patch is alpha-blended into the
+//! 2. **Pose warp** (Plan 6, task 6): the Audio2Pose head-pose coefficients
+//!    (yaw/pitch/roll + tx/ty/tz) are mapped to a 2D affine warp (rotate +
+//!    slight scale/translate) applied to the expression-warped frame.
+//! 3. **Mouth blend**: the Wav2Lip mouth patch is alpha-blended into the
 //!    lower-face region of the warped frame through a smooth elliptical
 //!    mask, so the precise lips replace the atlas's deterministic mouth.
 //!
@@ -249,21 +252,105 @@ fn patch_to_image(patch: &[f32]) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     img
 }
 
-/// Full per-frame fusion: expression-warp the source face, then blend the
-/// Wav2Lip mouth patch in.
+/// Applies a 2D affine head-pose warp to `src`.
+///
+/// The Audio2Pose coefficients are `[yaw, pitch, roll, tx, ty, tz]`:
+///
+/// - `yaw` (about the vertical axis) → horizontal shear
+/// - `pitch` (about the horizontal axis) → vertical shear
+/// - `roll` (about the view axis) → rotation
+/// - `tx` / `ty` → 2D translation (offset)
+/// - `tz` → scale (toward / away from the camera)
+///
+/// The transform is applied about the frame center so the head rotates
+/// around its own centre rather than drifting. The output is the same size
+/// as `src`; out-of-bounds samples clamp to the edge (bounded).
+///
+/// `pose` must be 6 values long; `strength` scales the whole effect.
+pub fn pose_warp(
+    src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    pose: &[f32],
+    strength: f32,
+) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let (w, h) = src.dimensions();
+    let (w, h) = (w as usize, h as usize);
+    let (cw, ch) = (w as f32 / 2.0, h as f32 / 2.0);
+
+    // Clamp each pose component to keep the warp bounded.
+    let yaw = pose.first().copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+    let pitch = pose.get(1).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+    let roll = pose.get(2).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+    let tx = pose.get(3).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+    let ty = pose.get(4).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+    let tz = pose.get(5).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+
+    // Rotation (roll) about the centre.
+    let ang = roll * 0.15 * strength;
+    let (sin_a, cos_a) = ang.sin_cos();
+    // Shear from yaw/pitch (small, bounded).
+    let shear_x = yaw * 0.20 * strength;
+    let shear_y = pitch * 0.20 * strength;
+    // Translation (offset) and scale (tz).
+    let off_x = tx * 0.10 * strength * w as f32;
+    let off_y = ty * 0.10 * strength * h as f32;
+    let scale = 1.0 + tz * 0.06 * strength;
+
+    let mut out = ImageBuffer::new(w as u32, h as u32);
+    for y in 0..h {
+        for x in 0..w {
+            // Normalized coords about the centre.
+            let (nx, ny) = (x as f32 - cw, y as f32 - ch);
+            // Inverse transform: apply rotation, shear, scale, then translate.
+            // We sample the source at the inverse-mapped position.
+            let (rx, ry) = (nx * cos_a + ny * sin_a, -nx * sin_a + ny * cos_a);
+            let (sx, sy) = (rx / scale, ry / scale);
+            let (px, py) = (sx - shear_x * sy, sy - shear_y * sx);
+            // Source pixel (clamped to edges -> bounded).
+            let sx = (px + cw - off_x).clamp(0.0, w as f32 - 1.0);
+            let sy = (py + ch - off_y).clamp(0.0, h as f32 - 1.0);
+            let x0 = (sx.floor() as usize).min(w - 1);
+            let y0 = (sy.floor() as usize).min(h - 1);
+            let x1 = (x0 + 1).min(w - 1);
+            let y1 = (y0 + 1).min(h - 1);
+            let fx = sx - x0 as f32;
+            let fy = sy - y0 as f32;
+            let p00 = src.get_pixel(x0 as u32, y0 as u32);
+            let p10 = src.get_pixel(x1 as u32, y0 as u32);
+            let p01 = src.get_pixel(x0 as u32, y1 as u32);
+            let p11 = src.get_pixel(x1 as u32, y1 as u32);
+            let mut px = [0u8; 4];
+            for c in 0..4 {
+                let top = p00[c] as f32 * (1.0 - fx) + p10[c] as f32 * fx;
+                let bot = p01[c] as f32 * (1.0 - fx) + p11[c] as f32 * fx;
+                px[c] = (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 255.0) as u8;
+            }
+            out.put_pixel(x as u32, y as u32, Rgba(px));
+        }
+    }
+    out
+}
+
+/// Full per-frame fusion: expression-warp the source face, apply the
+/// optional head-pose warp, then blend the Wav2Lip mouth patch in.
 ///
 /// - `src`: the avatar source face (already face-cropped).
 /// - `exp_coeffs`: 64 ExpNet expression coefficients for this frame.
+/// - `pose`: optional 6 Audio2Pose head-pose coefficients (yaw/pitch/roll +
+///   tx/ty/tz); `None` applies no pose warp.
 /// - `mouth_patch`: the 96×96×3 Wav2Lip mouth patch (values 0..1).
 ///
 /// The frame is resized to `cfg.size` at the end.
 pub fn fuse_frame(
     src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     exp_coeffs: &[f32],
+    pose: Option<&[f32]>,
     mouth_patch: &[f32],
     cfg: &FusionConfig,
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
-    let warped = warp_from_coeffs(src, exp_coeffs, cfg.strength);
+    let mut warped = warp_from_coeffs(src, exp_coeffs, cfg.strength);
+    if let Some(p) = pose {
+        warped = pose_warp(&warped, p, cfg.strength);
+    }
     let blended = blend_mouth(&warped, mouth_patch, cfg);
     if blended.dimensions() == (cfg.size, cfg.size) {
         blended
@@ -294,19 +381,19 @@ mod tests {
         // Neutral coefficients (all zero) + a dark patch.
         let neutral = [0.0f32; 64];
         let dark_patch = vec![0.0f32; 96 * 96 * 3];
-        let base = fuse_frame(&src, &neutral, &dark_patch, &cfg);
+        let base = fuse_frame(&src, &neutral, None, &dark_patch, &cfg);
 
         // 1. ExpNet signal: a mouth-open coefficient (index 0 = 1.0) warps the
         //    mouth, so the fused frame differs from neutral.
         let mut coeffs = [0.0f32; 64];
         coeffs[0] = 1.0;
-        let exp_warped = fuse_frame(&src, &coeffs, &dark_patch, &cfg);
+        let exp_warped = fuse_frame(&src, &coeffs, None, &dark_patch, &cfg);
         let exp_diff = pixel_diff(&base, &exp_warped);
         assert!(exp_diff > 0.0, "ExpNet signal should change the frame");
 
         // 2. Wav2Lip signal: a bright mouth patch changes the lower-face.
         let bright_patch = vec![1.0f32; 96 * 96 * 3];
-        let lip_blended = fuse_frame(&src, &neutral, &bright_patch, &cfg);
+        let lip_blended = fuse_frame(&src, &neutral, None, &bright_patch, &cfg);
         let lip_diff = pixel_diff(&base, &lip_blended);
         assert!(lip_diff > 0.0, "Wav2Lip signal should change the frame");
     }
@@ -321,8 +408,8 @@ mod tests {
         let c0 = [0.0f32; 64];
         let mut c1 = [0.0f32; 64];
         c1[3] = 1.0; // brow raise
-        let a = fuse_frame(&src, &c0, &dark, &cfg);
-        let b = fuse_frame(&src, &c1, &dark, &cfg);
+        let a = fuse_frame(&src, &c0, None, &dark, &cfg);
+        let b = fuse_frame(&src, &c1, None, &dark, &cfg);
         assert!(pixel_diff(&a, &b) > 0.0);
     }
 
@@ -334,7 +421,7 @@ mod tests {
         let neutral = [0.0f32; 64];
         let black = vec![0.0f32; 96 * 96 * 3];
 
-        let out = fuse_frame(&src, &neutral, &black, &cfg);
+        let out = fuse_frame(&src, &neutral, None, &black, &cfg);
         assert_eq!(out.dimensions(), (128, 128));
 
         // The mouth region (bottom-center) should be dark from the black patch.
@@ -350,6 +437,48 @@ mod tests {
         // The top of the frame stays white (mask only covers the lower face).
         let top = out.get_pixel(fw / 2, 5);
         assert!(top[0] > 200, "top of frame should stay white, got {}", top[0]);
+    }
+
+    /// T6: a nonzero pose changes the fused frame vs. no pose.
+    #[test]
+    fn pose_changes_frame() {
+        let src = test_face_cpu(128, 128);
+        let cfg = FusionConfig::default().with_size(128);
+        let neutral = [0.0f32; 64];
+        let dark = vec![0.0f32; 96 * 96 * 3];
+
+        let base = fuse_frame(&src, &neutral, None, &dark, &cfg);
+
+        // A roll (rotation) pose should visibly change the frame.
+        let pose = [0.0f32, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let posed = fuse_frame(&src, &neutral, Some(&pose), &dark, &cfg);
+        let diff = pixel_diff(&base, &posed);
+        assert!(diff > 0.0, "nonzero pose should change the frame");
+
+        // A translation (tx) pose should also change the frame.
+        let pose_tx = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let posed_tx = fuse_frame(&src, &neutral, Some(&pose_tx), &dark, &cfg);
+        let diff_tx = pixel_diff(&base, &posed_tx);
+        assert!(diff_tx > 0.0, "nonzero tx pose should change the frame");
+    }
+
+    /// T6: the pose warp is bounded — a large pose does not produce NaN /
+    /// garbage and keeps the same dimensions.
+    #[test]
+    fn pose_warp_is_bounded() {
+        let src = test_face_cpu(64, 64);
+        // Extreme pose values (clamped internally).
+        let pose = [1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let out = pose_warp(&src, &pose, 1.0);
+        assert_eq!(out.dimensions(), src.dimensions());
+
+        // The warp must not panic / produce garbage: same size, all pixels valid.
+        assert_eq!(out.dimensions(), src.dimensions());
+
+        // A zero pose is the identity (no change).
+        let zero = [0.0f32; 6];
+        let identity = pose_warp(&src, &zero, 1.0);
+        assert_eq!(pixel_diff(&src, &identity), 0.0, "zero pose should be identity");
     }
 
     fn pixel_diff(a: &ImageBuffer<Rgba<u8>, Vec<u8>>, b: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> f64 {

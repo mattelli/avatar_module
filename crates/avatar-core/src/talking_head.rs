@@ -71,6 +71,9 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 /// - `samples` / `sr`: the TTS audio (at Piper's rate; resampled internally).
 /// - `picture`: the avatar source image (optional; a synthetic face is used).
 /// - `cfg`: the fusion configuration (output size, warp strength, mask).
+/// - `pose`: optional flat per-frame Audio2Pose head-pose sequence
+///   (`video_frames × 6`; yaw/pitch/roll + tx/ty/tz per frame). `None`
+///   applies no head-pose warp.
 /// - `backend_pref`: optional backend override (defaults to Auto).
 ///
 /// Returns the RGBA frames, one per 25 fps video frame, at `cfg.size`.
@@ -79,6 +82,7 @@ pub fn render_talking_head(
     sr: u32,
     picture: Option<&Path>,
     cfg: &FusionConfig,
+    pose: Option<&[f32]>,
     backend_pref: BackendPreference,
 ) -> Result<Vec<ImageBuffer<Rgba<u8>, Vec<u8>>>> {
     // 1. Resample to the model rate.
@@ -134,13 +138,23 @@ pub fn render_talking_head(
         .context("wav2lip predict")?;
 
     // 7. Fuse: one frame per video_frames. The mouth patches cover the mel
-    //    chunks (chunk_frames >= video_frames); index clamped.
+    //    chunks (chunk_frames >= video_frames); index clamped. The optional
+    //    pose sequence is `video_frames × 6`; index clamped to its length.
     let mut frames = Vec::with_capacity(video_frames);
     for i in 0..video_frames {
         let coeff_row = &coeffs[i * 64..(i + 1) * 64];
         let chunk_idx = i.min(chunk_frames.saturating_sub(1));
         let mouth = &mouth_patches[chunk_idx];
-        let frame = fuse_frame(&src, coeff_row, mouth, cfg);
+        let pose_row = pose.and_then(|p| {
+            let n = p.len() / 6;
+            if n == 0 {
+                None
+            } else {
+                let idx = i.min(n - 1);
+                Some(&p[idx * 6..(idx + 1) * 6])
+            }
+        });
+        let frame = fuse_frame(&src, coeff_row, pose_row, mouth, cfg);
         frames.push(frame);
     }
 
@@ -230,7 +244,7 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(128);
-        let frames = render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto).unwrap();
         assert_eq!(frames.len(), 5);
         for f in &frames {
             assert_eq!(f.dimensions(), (cfg.size, cfg.size));
@@ -257,8 +271,8 @@ mod tests {
         };
         let cfg = FusionConfig::default().with_size(128);
 
-        let a = render_talking_head(&sine(440.0), sr, None, &cfg, BackendPreference::Auto).unwrap();
-        let b = render_talking_head(&sine(880.0), sr, None, &cfg, BackendPreference::Auto).unwrap();
+        let a = render_talking_head(&sine(440.0), sr, None, &cfg, None, BackendPreference::Auto).unwrap();
+        let b = render_talking_head(&sine(880.0), sr, None, &cfg, None, BackendPreference::Auto).unwrap();
         assert_eq!(a.len(), b.len());
 
         // Different audio -> different frames (mouth/expression differ).
@@ -294,7 +308,7 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(256);
-        let frames = render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto).unwrap();
         assert_eq!(frames.len(), 3);
 
         let out = std::env::temp_dir().join("avatar_t11_talking_head.mp4");

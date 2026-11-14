@@ -207,6 +207,7 @@ pub fn render_with_stats(
         sr,
         cfg.picture.as_deref(),
         &fcfg,
+        None, // pose sequence (wired in Plan 6, task 7)
         pref,
     )
     .context("talking-head render")?;
