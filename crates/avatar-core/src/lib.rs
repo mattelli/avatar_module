@@ -4,20 +4,15 @@ pub mod encoder;
 pub mod face_crop;
 pub mod markers;
 pub mod pipeline;
-pub mod renderer;
 pub mod tts;
-pub mod visemes;
 
 // Plan 5 — Wav2Lip + ExpNet fusion (task 6) and the talking-head render path
-// (task 8), only when the Burn crates are enabled via `talking-head`.
-#[cfg(feature = "talking-head")]
+// (task 8). The talking-head backend is the only backend (classic removed).
 pub mod fusion;
-#[cfg(feature = "talking-head")]
 pub mod talking_head;
 
 // Re-export the ExpNet backend types so downstream crates (avatar-py) can
 // name them without depending on expnet directly.
-#[cfg(feature = "talking-head")]
 pub use expnet::backend as expnet_backend;
 
 /// Placeholder module so the crate compiles before the first real component lands.

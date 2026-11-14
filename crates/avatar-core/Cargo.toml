@@ -3,7 +3,7 @@ name = "avatar-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core pipeline: text -> Piper TTS -> viseme lip-sync -> wgpu render -> MP4"
+description = "Core pipeline: text -> Piper TTS -> Wav2Lip+ExpNet talking head -> MP4"
 
 [dependencies]
 anyhow.workspace = true
@@ -12,13 +12,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hound = "3"
 image = "0.25"
-wgpu = "26"
-bytemuck = { version = "1", features = ["derive"] }
 fdk-aac = { version = "0.8", optional = true }
 openh264 = "0.9"
 mp4 = "0.14"
-# Async runtime for blocking on wgpu device requests in the sync pipeline.
-tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 
 # Face detection (SeetaFace via rustface, pure Rust, BSD-2-Clause) — plan 4.
 rustface = "0.1"
@@ -27,12 +23,9 @@ rustface = "0.1"
 piper-rs = { version = "0.2", optional = true }
 espeak-rs = { version = "0.2", optional = true, default-features = false }
 
-# Plan 5 — Wav2Lip + ExpNet talking-head backend (complementary crates).
-# Optional: the classic atlas/warp path stays the default until the models
-# are wired in (task 8); enabling `talking-head` pulls in the Burn-based
-# crates.
-wav2lip = { path = "../wav2lip", optional = true }
-expnet = { path = "../expnet", optional = true }
+# Plan 5 — Wav2Lip + ExpNet talking-head backend (required, the only backend).
+wav2lip = { path = "../wav2lip" }
+expnet = { path = "../expnet" }
 
 [features]
 default = ["embedded"]
@@ -42,19 +35,14 @@ embedded = ["dep:piper-rs", "dep:espeak-rs"]
 subprocess = []
 # FDK-AAC encoder for the audio track (optional).
 aac = ["dep:fdk-aac"]
-# Plan 5: Wav2Lip + ExpNet talking-head backend (Burn).
-talking-head = ["dep:wav2lip", "dep:expnet"]
-
-[dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [[example]]
 name = "talking_head_bench"
-required-features = ["talking-head"]
+required-features = []
 
 [[example]]
 name = "render_talking_head_api"
-required-features = ["talking-head"]
+required-features = []
 
 [[example]]
 name = "face_detect_debug"

@@ -1,8 +1,7 @@
 """Renders a short clip with the bundled test voice and plays it back with
 OpenCV (video) + sounddevice (audio), so you can see AND hear the generated
 video. Expression markers are stripped (expression is audio-driven); the
-Wav2Lip + ExpNet photorealistic 256x256 backend is available via
---talking-head.
+Wav2Lip + ExpNet photorealistic talking-head backend is the only backend.
 
 Usage (from the repo root, wheel installed):
     python examples/render_clip.py [output.mp4] [--no-play] [--frame N] [--save-frame out.png]
@@ -13,9 +12,7 @@ Options:
     --save-frame out.png  dump frame N (default 0) to the given path and exit
     --scale S             upscale displayed/dumped frames by factor S (default 1)
     --no-audio            disable audio playback (video only)
-    --size N              classic atlas output size in px: 32, 64, or 128
-                          (default 128; ignored with --talking-head)
-    --talking-head        use the Wav2Lip + ExpNet 256x256 backend
+    --size N              output size in px: 64, 128, 256, or 512 (default 256)
 
 Dependencies (all optional, graceful fallback):
     - OpenCV (cv2): video playback + frame dumping
@@ -153,8 +150,7 @@ def main() -> None:
     parser.add_argument("--save-frame", default=None, help="path for the dumped frame (default: frame_N.png)")
     parser.add_argument("--scale", type=int, default=1, help="upscale factor for display/dump (default 1)")
     parser.add_argument("--no-audio", action="store_true", help="disable audio playback")
-    parser.add_argument("--size", type=int, default=128, choices=[32, 64, 128], help="classic atlas output size in px (default 128; ignored with --talking-head)")
-    parser.add_argument("--talking-head", action="store_true", help="use the Wav2Lip + ExpNet photorealistic 256x256 backend (requires model weights)")
+    parser.add_argument("--size", type=int, default=256, choices=[64, 128, 256, 512], help="output size in px (default 256)")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -166,7 +162,6 @@ def main() -> None:
         strength=0.5,
         face_crop=True,        # center-crop to the detected face
         face_crop_margin=0.35,  # margin around the face box
-        talking_head=args.talking_head,
     )
     text = "Hello world. Great news. It is over."  # markers are stripped; audio-driven expression
     frames = engine.render(text, str(out))

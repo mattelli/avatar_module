@@ -1,6 +1,6 @@
 //! Benchmarks the talking-head render on GPU (burn-wgpu) vs CPU (burn-flex)
 //! for a short clip, with per-stage timing. Run:
-//!   cargo run -p avatar-core --features talking-head --example talking_head_bench
+//!   cargo run -p avatar-core --example talking_head_bench
 
 use std::time::Instant;
 

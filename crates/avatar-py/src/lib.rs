@@ -5,7 +5,7 @@
 //! engine = live_avatar.Engine(
 //!     voice_model="voices/en_US-amy-medium.onnx",
 //!     picture="portrait.png",   # optional; synthetic face otherwise
-//!     size=64,                  # 32 or 64 px
+//!     size=256,                 # 64 | 128 | 256 | 512
 //! )
 //! engine.render("Hello world", "out.mp4")
 //! ```
@@ -14,7 +14,7 @@
 //! expression is audio-driven.
 //!
 //! The render runs with the GIL released (PyO3 `allow_threads`), so Python
-//! threads keep running while WebGPU compute + encoding happen.
+//! threads keep running while the talking-head inference + encoding happen.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -26,10 +26,8 @@ struct Engine {
     picture: Option<std::path::PathBuf>,
     strength: f32,
     size: u32,
-    breath_period_secs: f32,
     face_crop: bool,
     face_crop_margin: f32,
-    talking_head: bool,
     backend: Option<avatar_core::pipeline::BackendPref>,
 }
 
@@ -41,36 +39,28 @@ impl Engine {
     ///   (the matching `.onnx.json` must sit next to it).
     /// - `picture`: optional avatar picture (PNG/JPEG); a synthetic
     ///   gradient face is used when omitted.
-    /// - `size`: output size in px for the classic atlas path: 32 (default),
-    ///   64, or 128. When `talking_head=True` the output is a fixed 256×256
-    ///   photorealistic clip (this value is ignored).
+    /// - `size`: output size in px: 64, 128, 256, or 512 (default 256).
     /// - `strength`: expression warp strength (photos ~0.5, cartoons ~1.0).
-    /// - `breath_period_secs`: breathing cycle length (default 4 s).
-    /// - `face_crop`: detect the face and center-crop before atlas warping
+    /// - `face_crop`: detect the face and center-crop before warping
     ///   (default True; falls back to the whole image if no face is found).
     /// - `face_crop_margin`: crop margin as a fraction of the face-box size
     ///   (default 0.35).
-    /// - `talking_head`: use the Wav2Lip + ExpNet photorealistic 256×256
-    ///   backend (default False; requires model weights + the `talking-head`
-    ///   feature).
     /// - `backend`: backend for the talking-head path: "auto" (default; GPU
     ///   when available, CPU otherwise), "gpu", or "cpu".
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=32, strength=0.5, breath_period_secs=4.0, face_crop=true, face_crop_margin=0.35, talking_head=false, backend="auto"))]
+    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto"))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
         size: u32,
         strength: f32,
-        breath_period_secs: f32,
         face_crop: bool,
         face_crop_margin: f32,
-        talking_head: bool,
         backend: &str,
     ) -> PyResult<Self> {
-        if size != 32 && size != 64 && size != 128 {
+        if size != 64 && size != 128 && size != 256 && size != 512 {
             return Err(PyValueError::new_err(format!(
-                "size must be 32, 64, or 128, got {size}"
+                "size must be 64, 128, 256, or 512, got {size}"
             )));
         }
         let model_path = std::path::PathBuf::from(voice_model);
@@ -92,10 +82,8 @@ impl Engine {
             picture: picture.map(std::path::PathBuf::from),
             strength,
             size,
-            breath_period_secs,
             face_crop,
             face_crop_margin,
-            talking_head,
             backend,
         })
     }
@@ -112,10 +100,8 @@ impl Engine {
             picture: self.picture.clone(),
             strength: self.strength,
             size: self.size,
-            breath_period_secs: self.breath_period_secs,
             face_crop: self.face_crop,
             face_crop_margin: self.face_crop_margin,
-            talking_head: self.talking_head,
             backend: self.backend,
         };
         let out_path = std::path::PathBuf::from(out);
