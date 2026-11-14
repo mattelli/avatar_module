@@ -13,6 +13,8 @@ Options:
     --scale S             upscale displayed/dumped frames by factor S (default 1)
     --no-audio            disable audio playback (video only)
     --size N              output size in px: 64, 128, 256, or 512 (default 256)
+    --pose-seed N         Audio2Pose latent seed for reproducible head motion
+                          (default: stochastic head motion per render)
 
 Dependencies (all optional, graceful fallback):
     - OpenCV (cv2): video playback + frame dumping
@@ -151,6 +153,7 @@ def main() -> None:
     parser.add_argument("--scale", type=int, default=1, help="upscale factor for display/dump (default 1)")
     parser.add_argument("--no-audio", action="store_true", help="disable audio playback")
     parser.add_argument("--size", type=int, default=256, choices=[64, 128, 256, 512], help="output size in px (default 256)")
+    parser.add_argument("--pose-seed", type=int, default=None, help="Audio2Pose latent seed for reproducible head motion (default: stochastic)")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -162,6 +165,7 @@ def main() -> None:
         strength=0.5,
         face_crop=True,        # center-crop to the detected face
         face_crop_margin=0.35,  # margin around the face box
+        pose_seed=args.pose_seed,  # None = stochastic head motion; int = reproducible
     )
     text = "Hello world. Great news. It is over."  # markers are stripped; audio-driven expression
     frames = engine.render(text, str(out))

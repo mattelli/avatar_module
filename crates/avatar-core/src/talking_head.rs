@@ -1,13 +1,15 @@
-//! Wav2Lip + ExpNet talking-head render path (Plan 5, task 8).
+//! Wav2Lip + ExpNet talking-head render path (Plan 5, task 8; pose Plan 6).
 //!
 //! Replaces the atlas/warp renderer with a photorealistic talking head:
 //!
 //! 1. Piper TTS audio is resampled to 16 kHz (the models' input rate).
 //! 2. [`expnet::ExpNet`] maps the audio to per-frame expression coefficients.
 //! 3. [`wav2lip::Wav2Lip`] maps audio windows + the (face-cropped) source to
-//!    precise 96×96 mouth patches.
-//! 4. [`crate::fusion`] combines them per frame: expression-warp the source,
-//!    then alpha-blend the mouth patch in.
+//!    precise 96×96 mouth patches, and exposes the 512-d audio embeddings.
+//! 4. [`pose::Audio2Pose`] maps those embeddings to per-frame head-pose motion
+//!    (yaw/pitch/roll + tx/ty/tz), seeded optionally (Plan 6).
+//! 5. [`crate::fusion`] combines them per frame: expression-warp the source,
+//!    apply the head-pose warp, then alpha-blend the mouth patch in.
 //!
 //! Returns RGBA frames at `FusionConfig::size`, which the caller encodes to
 //! MP4 with the existing encoder/muxer (audio keeps the original TTS rate).
@@ -33,6 +35,8 @@ pub const TALKING_HEAD_SIZE: u32 = 256;
 pub const WAV2LIP_WEIGHTS: &str = "wav2lip_gan.bpk";
 /// Path to the ExpNet `.bpk` weights.
 pub const EXPNET_WEIGHTS: &str = "expnet.bpk";
+/// Path to the Audio2Pose `.bpk` weights (Plan 6).
+pub const POSE_WEIGHTS: &str = "pose.bpk";
 
 /// Resolves the `.res/models` directory (same walk-up as `face_crop`).
 fn models_dir() -> Option<PathBuf> {
@@ -71,9 +75,9 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 /// - `samples` / `sr`: the TTS audio (at Piper's rate; resampled internally).
 /// - `picture`: the avatar source image (optional; a synthetic face is used).
 /// - `cfg`: the fusion configuration (output size, warp strength, mask).
-/// - `pose`: optional flat per-frame Audio2Pose head-pose sequence
-///   (`video_frames × 6`; yaw/pitch/roll + tx/ty/tz per frame). `None`
-///   applies no head-pose warp.
+/// - `pose_seed`: optional Audio2Pose latent seed (Plan 6). `None` = sample the
+///   latent `z ~ N(0,1)` per render (stochastic head motion); `Some(seed)` =
+///   reproducible head motion. Head pose is always applied (audio-driven).
 /// - `backend_pref`: optional backend override (defaults to Auto).
 ///
 /// Returns the RGBA frames, one per 25 fps video frame, at `cfg.size`.
@@ -82,7 +86,7 @@ pub fn render_talking_head(
     sr: u32,
     picture: Option<&Path>,
     cfg: &FusionConfig,
-    pose: Option<&[f32]>,
+    pose_seed: Option<u64>,
     backend_pref: BackendPreference,
 ) -> Result<Vec<ImageBuffer<Rgba<u8>, Vec<u8>>>> {
     // 1. Resample to the model rate.
@@ -101,6 +105,7 @@ pub fn render_talking_head(
     let dir = models_dir().context("no .res/models directory found")?;
     let expnet_weights = dir.join("expnet").join(EXPNET_WEIGHTS);
     let wav2lip_weights = dir.join("wav2lip").join(WAV2LIP_WEIGHTS);
+    let pose_weights = dir.join("pose").join(POSE_WEIGHTS);
     anyhow::ensure!(
         expnet_weights.exists(),
         "expnet weights not found: {}",
@@ -111,12 +116,20 @@ pub fn render_talking_head(
         "wav2lip weights not found: {}",
         wav2lip_weights.display()
     );
+    anyhow::ensure!(
+        pose_weights.exists(),
+        "pose weights not found: {}",
+        pose_weights.display()
+    );
 
     let backend = Backend::select(backend_pref).context("backend selection failed")?;
     let expnet = expnet::ExpNet::with_backend(&expnet_weights, &backend)
         .context("load expnet model")?;
     let wav2lip = wav2lip::Wav2Lip::with_backend(&wav2lip_weights, &backend)
         .context("load wav2lip model")?;
+    let audio2pose = pose::Audio2Pose::with_backend(&pose_weights, &backend)
+        .context("load pose model")?
+        .with_seed(pose_seed);
 
     // 4. Expression coefficients (ExpNet) — one 64-d vector per video frame.
     let coeffs = expnet.predict(&mel, video_frames).context("expnet predict")?;
@@ -125,6 +138,16 @@ pub fn render_talking_head(
     let chunks = wav2lip::mel_chunks(&mel);
     anyhow::ensure!(!chunks.is_empty(), "no wav2lip mel chunks");
     let chunk_frames = chunks.len();
+
+    // 5b. Audio embeddings (Wav2Lip encoder) → head-pose motion (Audio2Pose).
+    //     One 512-d embedding per mel chunk; the decoder returns 6 pose values
+    //     per frame (yaw/pitch/roll + tx/ty/tz). Always applied (Plan 6).
+    let audio_emb = wav2lip
+        .audio_embeddings(&chunks, 8)
+        .context("wav2lip audio embeddings")?;
+    let pose_seq = audio2pose
+        .decode(&audio_emb)
+        .context("audio2pose decode")?;
 
     // 6. Source face: detect + crop (or synthetic face).
     let src = load_source_face(picture, cfg.size)?;
@@ -138,22 +161,22 @@ pub fn render_talking_head(
         .context("wav2lip predict")?;
 
     // 7. Fuse: one frame per video_frames. The mouth patches cover the mel
-    //    chunks (chunk_frames >= video_frames); index clamped. The optional
-    //    pose sequence is `video_frames × 6`; index clamped to its length.
+    //    chunks (chunk_frames >= video_frames); index clamped. The pose
+    //    sequence is `video_frames × 6`; index clamped to its length.
     let mut frames = Vec::with_capacity(video_frames);
     for i in 0..video_frames {
         let coeff_row = &coeffs[i * 64..(i + 1) * 64];
         let chunk_idx = i.min(chunk_frames.saturating_sub(1));
         let mouth = &mouth_patches[chunk_idx];
-        let pose_row = pose.and_then(|p| {
-            let n = p.len() / 6;
+        let pose_row = {
+            let n = pose_seq.len() / 6;
             if n == 0 {
                 None
             } else {
                 let idx = i.min(n - 1);
-                Some(&p[idx * 6..(idx + 1) * 6])
+                Some(&pose_seq[idx * 6..(idx + 1) * 6])
             }
-        });
+        };
         let frame = fuse_frame(&src, coeff_row, pose_row, mouth, cfg);
         frames.push(frame);
     }
@@ -227,6 +250,7 @@ mod tests {
         let Some(dir) = models_dir() else { return false };
         dir.join("expnet").join(EXPNET_WEIGHTS).exists()
             && dir.join("wav2lip").join(WAV2LIP_WEIGHTS).exists()
+            && dir.join("pose").join(POSE_WEIGHTS).exists()
     }
 
     /// T8: the full talking-head path produces frames at the configured size
@@ -244,7 +268,7 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(128);
-        let frames = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, Some(42), BackendPreference::Auto).unwrap();
         assert_eq!(frames.len(), 5);
         for f in &frames {
             assert_eq!(f.dimensions(), (cfg.size, cfg.size));
@@ -271,8 +295,8 @@ mod tests {
         };
         let cfg = FusionConfig::default().with_size(128);
 
-        let a = render_talking_head(&sine(440.0), sr, None, &cfg, None, BackendPreference::Auto).unwrap();
-        let b = render_talking_head(&sine(880.0), sr, None, &cfg, None, BackendPreference::Auto).unwrap();
+        let a = render_talking_head(&sine(440.0), sr, None, &cfg, Some(1), BackendPreference::Auto).unwrap();
+        let b = render_talking_head(&sine(880.0), sr, None, &cfg, Some(1), BackendPreference::Auto).unwrap();
         assert_eq!(a.len(), b.len());
 
         // Different audio -> different frames (mouth/expression differ).
@@ -308,7 +332,7 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(256);
-        let frames = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto).unwrap();
         assert_eq!(frames.len(), 3);
 
         let out = std::env::temp_dir().join("avatar_t11_talking_head.mp4");
@@ -340,5 +364,48 @@ mod tests {
         assert!(parsed.sample_count(audio_id).unwrap() > 0, "audio track empty");
 
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// T7: with a fixed pose seed the render is byte-identical across runs
+    /// (reproducible head motion); with `None` it differs (stochastic latent).
+    #[test]
+    fn talking_head_pose_seed_determinism() {
+        if !models_present() {
+            return;
+        }
+        let sr = MODEL_SAMPLE_RATE;
+        let n = (0.2 * sr as f32) as usize; // 5 frames
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin() * 0.5)
+            .collect();
+        let cfg = FusionConfig::default().with_size(64);
+
+        // Same seed -> identical frames.
+        let a = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto)
+            .unwrap();
+        let b = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto)
+            .unwrap();
+        assert_eq!(a.len(), b.len());
+        for (fa, fb) in a.iter().zip(b.iter()) {
+            assert_eq!(fa.as_raw(), fb.as_raw(), "seeded pose should be identical");
+        }
+
+        // No seed -> stochastic latent, so frames differ between runs.
+        let c = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto)
+            .unwrap();
+        let d = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto)
+            .unwrap();
+        let diff: u64 = c
+            .iter()
+            .zip(d.iter())
+            .map(|(fc, fd)| {
+                fc.as_raw()
+                    .iter()
+                    .zip(fd.as_raw().iter())
+                    .map(|(x, y)| (*x as i64 - *y as i64).unsigned_abs())
+                    .sum::<u64>()
+            })
+            .sum();
+        assert!(diff > 0, "unseeded pose should differ between runs");
     }
 }

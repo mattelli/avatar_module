@@ -31,6 +31,9 @@ use model::Model;
 pub const IMG_SIZE: u32 = 96;
 /// Mel window width (columns) per video frame.
 pub const MEL_STEP: usize = 16;
+/// Audio-embedding dimension (the Wav2Lip audio encoder output, consumed by
+/// Audio2Pose — Plan 6).
+pub const AUDIO_EMB_DIM: usize = 512;
 /// `mel_idx_multiplier = 80 / fps` (80 mel frames/sec at 16 kHz, 25 fps video).
 const MEL_IDX_MULTIPLIER: f32 = 80.0 / 25.0;
 /// Face pad: Wav2Lip default `pads = [0, 10, 0, 0]` -> (pady1, pady2, padx1, padx2).
@@ -61,6 +64,46 @@ impl Wav2Lip {
         let device = backend.device().clone();
         let model = Model::from_file(weights.as_ref(), &device);
         Ok(Self { model, device })
+    }
+
+    /// Runs only the Wav2Lip audio encoder on mel chunks and returns the
+    /// 512-d audio embeddings, one per chunk (Plan 6 — Audio2Pose input).
+    ///
+    /// - `mel_chunks`: `[n, 80, 16]` normalized mel windows (from
+    ///   [`mel_chunks`]).
+    ///
+    /// Returns a flat `[n, 512]` row-major embedding sequence. Chunks are
+    /// processed in batches of `batch_size` to amortize per-call overhead.
+    pub fn audio_embeddings(
+        &self,
+        mel_chunks: &[MelChunk],
+        batch_size: usize,
+    ) -> Result<Vec<f32>> {
+        anyhow::ensure!(!mel_chunks.is_empty(), "no input chunks");
+        let n = mel_chunks.len();
+        let batch_size = batch_size.max(1);
+        let mut out = Vec::with_capacity(n * AUDIO_EMB_DIM);
+
+        for start in (0..n).step_by(batch_size) {
+            let end = (start + batch_size).min(n);
+            let b = end - start;
+
+            // mel: [b, 1, 80, 16]
+            let mut mel_data = Vec::with_capacity(b * 80 * 16);
+            for chunk in &mel_chunks[start..end] {
+                mel_data.extend_from_slice(&chunk.mel);
+            }
+            let mel_t: Tensor<4> =
+                Tensor::from_data(TensorData::new(mel_data, [b, 1, 80, 16]), &self.device);
+
+            let out_t = self.model.audio_embedding(mel_t); // [b, 512, 1, 1]
+            let data = out_t.into_data();
+            let arr = data.as_slice::<f32>().context("wav2lip embedding not f32")?;
+            // Flatten [b, 512, 1, 1] -> [b, 512].
+            out.extend_from_slice(arr);
+        }
+
+        Ok(out)
     }
 
     /// Runs Wav2Lip on mel chunks + face inputs.
@@ -103,8 +146,8 @@ impl Wav2Lip {
 
             // mel: [b, 1, 80, 16]
             let mut mel_data = Vec::with_capacity(b * 80 * 16);
-            for i in start..end {
-                mel_data.extend_from_slice(&mel_chunks[i].mel);
+            for chunk in &mel_chunks[start..end] {
+                mel_data.extend_from_slice(&chunk.mel);
             }
             let mel_t: Tensor<4> =
                 Tensor::from_data(TensorData::new(mel_data, [b, 1, 80, 16]), &self.device);
@@ -393,5 +436,30 @@ mod tests {
             .map(|(x, y)| (x - y).abs())
             .sum();
         assert!(diff > 1e-3, "mouth should differ with audio, diff={diff}");
+    }
+
+    /// Plan 6: the audio encoder exposes a 512-d embedding per mel chunk, and
+    /// different audio yields different embeddings (Audio2Pose input).
+    #[test]
+    fn audio_embeddings_shape_and_vary() {
+        let Some(weights) = weights_path() else { return };
+        let backend = expnet::backend::Backend::select(expnet::backend::BackendPreference::Cpu)
+            .unwrap();
+        let model = Wav2Lip::with_backend(&weights, &backend).unwrap();
+
+        let chunk_a = first_chunk(440.0);
+        let chunk_b = first_chunk(880.0);
+
+        let emb_a = model.audio_embeddings(&[chunk_a], 8).unwrap();
+        let emb_b = model.audio_embeddings(&[chunk_b], 8).unwrap();
+
+        assert_eq!(emb_a.len(), AUDIO_EMB_DIM);
+        assert_eq!(emb_b.len(), AUDIO_EMB_DIM);
+        for v in emb_a.iter().chain(emb_b.iter()) {
+            assert!(v.is_finite(), "embedding not finite: {v}");
+        }
+        // Different audio -> different embeddings.
+        let diff: f32 = emb_a.iter().zip(emb_b.iter()).map(|(x, y)| (x - y).abs()).sum();
+        assert!(diff > 1e-3, "embeddings should differ with audio, diff={diff}");
     }
 }

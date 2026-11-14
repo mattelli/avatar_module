@@ -1,5 +1,8 @@
 # Plan 6 — Talking-head only backend, configurable output sizes, and Audio2Pose head motion
 
+**Status: implemented (tasks 1–7).** All tasks below are committed; the
+talking-head backend (Wav2Lip + ExpNet + Audio2Pose) is the only backend.
+
 **References:** `PLAN_WAV2LIP_EXPNET.md` (Plan 5, the talking-head backend being kept),
 `PLAN_AVATAR_MODULE.md` (Plan 1, the classic atlas/wgpu path being removed),
 `AVATAR_MODULE_REPORT.md`. This plan supersedes the classic backend and the two
@@ -124,6 +127,12 @@ unimplemented companion plans.
 ### Task 7 — Wire pose into the pipeline + docs
 - Thread the pose seed through `EngineConfig` (and the Python `Engine`) into the talking-head
   path.
+- Add the Wav2Lip audio-encoder embedding extractor (`Model::audio_embedding` /
+  `Wav2Lip::audio_embeddings`) that Audio2Pose consumes (the encoder was previously only an
+  internal stage of `forward`).
+- Add the `pose` crate as a dependency of `avatar-core`; load Audio2Pose in
+  `render_talking_head`, decode the audio embeddings into a per-frame pose sequence, and feed it
+  to `fuse_frame`.
 - Update `README.md`, `PERF_NOTES.md`, and the plan cross-references to describe the new
   talking-head-only pipeline, size options, and pose behavior.
 - Commit: `task7: wire pose seed through pipeline and update docs`

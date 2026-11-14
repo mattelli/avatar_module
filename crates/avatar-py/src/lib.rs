@@ -29,6 +29,7 @@ struct Engine {
     face_crop: bool,
     face_crop_margin: f32,
     backend: Option<avatar_core::pipeline::BackendPref>,
+    pose_seed: Option<u64>,
 }
 
 #[pymethods]
@@ -47,8 +48,10 @@ impl Engine {
     ///   (default 0.35).
     /// - `backend`: backend for the talking-head path: "auto" (default; GPU
     ///   when available, CPU otherwise), "gpu", or "cpu".
+    /// - `pose_seed`: optional Audio2Pose latent seed for reproducible head
+    ///   motion (default None = stochastic head motion per render).
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto"))]
+    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto", pose_seed=None))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
@@ -57,6 +60,7 @@ impl Engine {
         face_crop: bool,
         face_crop_margin: f32,
         backend: &str,
+        pose_seed: Option<u64>,
     ) -> PyResult<Self> {
         if size != 64 && size != 128 && size != 256 && size != 512 {
             return Err(PyValueError::new_err(format!(
@@ -85,6 +89,7 @@ impl Engine {
             face_crop,
             face_crop_margin,
             backend,
+            pose_seed,
         })
     }
 
@@ -103,6 +108,7 @@ impl Engine {
             face_crop: self.face_crop,
             face_crop_margin: self.face_crop_margin,
             backend: self.backend,
+            pose_seed: self.pose_seed,
         };
         let out_path = std::path::PathBuf::from(out);
         // GIL released: the pipeline is pure native compute.
@@ -116,6 +122,12 @@ impl Engine {
     #[getter]
     fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Audio2Pose latent seed (None = stochastic head motion).
+    #[getter]
+    fn pose_seed(&self) -> Option<u64> {
+        self.pose_seed
     }
 }
 

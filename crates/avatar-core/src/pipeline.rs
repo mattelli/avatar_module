@@ -32,6 +32,10 @@ pub struct EngineConfig {
     /// Backend override for the talking-head path (GPU/CPU/Auto). `None` =
     /// auto-select (GPU when available, CPU otherwise).
     pub backend: Option<BackendPref>,
+    /// Optional Audio2Pose latent seed (Plan 6). `None` = stochastic head
+    /// motion (a fresh latent `z ~ N(0,1)` per render); `Some(seed)` =
+    /// reproducible head motion.
+    pub pose_seed: Option<u64>,
 }
 
 /// Backend selection for the talking-head path.
@@ -74,6 +78,7 @@ impl EngineConfig {
             face_crop: true,
             face_crop_margin: crate::face_crop::DEFAULT_FACE_CROP_MARGIN,
             backend: None,
+            pose_seed: None,
         }
     }
 
@@ -111,6 +116,13 @@ impl EngineConfig {
     /// Forces the backend for the talking-head path (GPU/CPU/Auto).
     pub fn with_backend(mut self, backend: BackendPref) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    /// Sets the Audio2Pose latent seed (Plan 6). `None` = stochastic head
+    /// motion; `Some(seed)` = reproducible head motion.
+    pub fn with_pose_seed(mut self, seed: Option<u64>) -> Self {
+        self.pose_seed = seed;
         self
     }
 }
@@ -207,7 +219,7 @@ pub fn render_with_stats(
         sr,
         cfg.picture.as_deref(),
         &fcfg,
-        None, // pose sequence (wired in Plan 6, task 7)
+        cfg.pose_seed, // Audio2Pose latent seed (Plan 6, task 7)
         pref,
     )
     .context("talking-head render")?;
