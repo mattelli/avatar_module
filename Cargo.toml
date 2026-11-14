@@ -5,6 +5,7 @@ members = [
     "crates/avatar-py",
     "crates/wav2lip",
     "crates/expnet",
+    "crates/pose",
 ]
 
 [workspace.package]
@@ -16,6 +17,7 @@ repository = "https://github.com/max/avatar_module"
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
+rand = "0.8"
 
 # Burn deep-learning stack (Plan 5 — Wav2Lip + ExpNet talking-head backend).
 # 0.22.0 is the current stable release; burn-flex (CPU) and burn-onnx (ONNX
