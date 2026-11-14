@@ -83,10 +83,11 @@ impl EngineConfig {
         self
     }
 
-    /// Output size (64, 128, 256, or 512 px).
-    pub fn with_size(mut self, size: u32) -> Self {
+    /// Output size (64, 128, 256, or 512 px). Returns an error for other sizes.
+    pub fn with_size(mut self, size: u32) -> anyhow::Result<Self> {
+        validate_size(size)?;
         self.size = size;
-        self
+        Ok(self)
     }
 
     /// Warp strength for the expression warp.
@@ -148,6 +149,20 @@ fn concat_samples(synth: &[SpanSynth]) -> (Vec<f32>, u32) {
     (samples, sr)
 }
 
+/// Validates an output size against [`crate::encoder::SUPPORTED_SIZES`].
+pub fn validate_size(size: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::encoder::SUPPORTED_SIZES.contains(&size),
+        "unsupported output size {size}; supported sizes are {}",
+        crate::encoder::SUPPORTED_SIZES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+
 /// Renders the full clip: text → markers → TTS → talking-head → encode → `.mp4`.
 ///
 /// Returns the number of video frames written.
@@ -163,6 +178,9 @@ pub fn render_with_stats(
 ) -> anyhow::Result<(usize, Duration)> {
     let t0 = std::time::Instant::now();
     let out = out.as_ref();
+
+    // 0. Validate the output size.
+    validate_size(cfg.size)?;
 
     // 1. Markers (stripped; expression is audio-driven).
     let spans = markers::parse(text);
@@ -332,5 +350,29 @@ mod tests {
         // surrounding whitespace: " hi " + " a " + " b" with the markers'
         // spaces preserved.
         assert_eq!(spans[0].text, " hi   a  b");
+    }
+
+    /// Output sizes: 64/128/256/512 are valid; others are rejected.
+    #[test]
+    fn validate_size_accepts_supported() {
+        for &s in &crate::encoder::SUPPORTED_SIZES {
+            assert!(validate_size(s).is_ok(), "{s} should be supported");
+        }
+    }
+
+    #[test]
+    fn validate_size_rejects_unsupported() {
+        for &s in &[0u32, 32, 100, 1280] {
+            assert!(validate_size(s).is_err(), "{s} should be rejected");
+        }
+    }
+
+    /// `with_size` returns an error for unsupported sizes.
+    #[test]
+    fn with_size_rejects_invalid() {
+        let model = PathBuf::from("unused.onnx");
+        assert!(EngineConfig::voice(&model).with_size(64).is_ok());
+        assert!(EngineConfig::voice(&model).with_size(256).is_ok());
+        assert!(EngineConfig::voice(&model).with_size(32).is_err());
     }
 }
