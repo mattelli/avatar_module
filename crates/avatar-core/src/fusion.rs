@@ -167,40 +167,50 @@ fn face_points_neutral() -> Vec<ControlPoint> {
     ]
 }
 
-/// A source→destination region blend: take a sub-rectangle of a source patch
-/// and alpha-blend it (through a feathered ellipse) into a rectangle of the
-/// frame. Both rectangles are normalized (0..1) so they scale with the frame.
+/// A source→destination region blend: map a sub-rectangle of a source patch
+/// into a rectangle of the frame, then alpha-blend it through a feathered
+/// ellipse. All rectangles are normalized (0..1) so they scale with the frame.
+///
+/// The *mapping* (`src`→`dst`) and the *mask* are independent: the patch may
+/// cover the whole frame (`src`/`dst` = full) while only a small region is
+/// blended (`mask` = the mouth ellipse).
 ///
 /// This is the general primitive behind [`blend_mouth`]; other facial regions
 /// (e.g. eyes for blinking) can be added by defining further regions once a
 /// model produces imagery for them.
 #[derive(Debug, Clone, Copy)]
 pub struct RegionBlend {
-    /// Source sub-rectangle `[x0, y0, x1, y1]` (normalized) of the patch.
+    /// Sub-rectangle of the source patch to sample `[x0, y0, x1, y1]`.
     pub src: [f32; 4],
-    /// Destination rectangle `[x0, y0, x1, y1]` (normalized) of the frame.
+    /// Where `src` maps to in the frame `[x0, y0, x1, y1]`.
     pub dst: [f32; 4],
+    /// Elliptical mask region in the frame `[x0, y0, x1, y1]` where blending
+    /// occurs (the feathered ellipse is inscribed in this rect).
+    pub mask: [f32; 4],
     /// Feather of the elliptical mask (0 = hard edge, 1 = fully soft).
     pub feather: f32,
 }
 
 impl RegionBlend {
-    /// The mouth region: the lower-center of the Wav2Lip 96×96 face blended
-    /// into the bottom-center of the frame.
+    /// The mouth region: the Wav2Lip 96×96 face mapped onto the whole frame
+    /// (full scale), blended only in the bottom-center mouth ellipse.
     ///
-    /// Wav2Lip outputs a **full face**, not a mouth-only patch, so we take the
-    /// mouth sub-rectangle of that face (the lower-center third) and blend only
-    /// that in — the rest of the source frame (with its expression/pose warp)
-    /// is kept.
+    /// Wav2Lip outputs a **full face** with the *same framing* as the source
+    /// (its input is the source face resized to 96×96), so the patch maps
+    /// 1:1 onto the frame — the mouth then lands exactly on the source mouth.
+    /// Mapping only a sub-rectangle would shift/stretch the mouth and leave the
+    /// source mouth showing through (a "double mouth").
     pub fn mouth(cfg: &FusionConfig) -> Self {
         let w = cfg.mouth_mask_width.clamp(0.0, 1.0);
         let h = cfg.mouth_mask_height.clamp(0.0, 1.0);
         let x0 = (1.0 - w) / 2.0;
+        let y0 = 1.0 - h;
         Self {
-            // Mouth sub-rectangle of the 96×96 Wav2Lip face (lower-center).
-            src: [0.25, 0.60, 0.75, 1.0],
-            // Bottom-center of the frame (centered horizontally, anchored down).
-            dst: [x0, 1.0 - h, x0 + w, 1.0],
+            // Full patch -> full frame (identity framing).
+            src: [0.0, 0.0, 1.0, 1.0],
+            dst: [0.0, 0.0, 1.0, 1.0],
+            // Blend only the bottom-center mouth ellipse.
+            mask: [x0, y0, x0 + w, 1.0],
             feather: cfg.mask_feather,
         }
     }
@@ -235,20 +245,25 @@ pub fn blend_region(
 
     let resized = image::imageops::resize(&crop, dw, dh, image::imageops::FilterType::Triangle);
 
+    // Mask ellipse (inscribed in the `mask` rect).
+    let mx0 = (region.mask[0].clamp(0.0, 1.0) * fw as f32) as u32;
+    let my0 = (region.mask[1].clamp(0.0, 1.0) * fh as f32) as u32;
+    let mx1 = ((region.mask[2].clamp(0.0, 1.0) * fw as f32).ceil() as u32).min(fw);
+    let my1 = ((region.mask[3].clamp(0.0, 1.0) * fh as f32).ceil() as u32).min(fh);
+    let mw = mx1.saturating_sub(mx0).max(1);
+    let mh = my1.saturating_sub(my0).max(1);
+
     let mut out = frame.clone();
     let feather = region.feather.clamp(0.0, 1.0);
-    let cx = dx0 as f32 + dw as f32 / 2.0;
-    let cy = dy0 as f32 + dh as f32 / 2.0;
-    let rx = dw as f32 / 2.0;
-    let ry = dh as f32 / 2.0;
+    let cx = mx0 as f32 + mw as f32 / 2.0;
+    let cy = my0 as f32 + mh as f32 / 2.0;
+    let rx = mw as f32 / 2.0;
+    let ry = mh as f32 / 2.0;
 
-    for y in 0..dh {
-        for x in 0..dw {
-            let fx = dx0 + x;
-            let fy = dy0 + y;
-            if fx >= fw || fy >= fh {
-                continue;
-            }
+    // Iterate the mask region; sample the (resized) patch at the same frame
+    // position so the mapping stays 1:1.
+    for fy in my0..my1 {
+        for fx in mx0..mx1 {
             // Normalized distance inside the ellipse (0 center, 1 edge).
             let nx = (fx as f32 - cx) / rx;
             let ny = (fy as f32 - cy) / ry;
@@ -265,7 +280,10 @@ pub fn blend_region(
                 let t = (d - edge) / (1.0 - edge).max(1e-6);
                 1.0 - t
             };
-            let p = resized.get_pixel(x, y);
+            // Patch sample for this frame pixel (dst-mapped).
+            let px = fx.saturating_sub(dx0).min(dw - 1);
+            let py = fy.saturating_sub(dy0).min(dh - 1);
+            let p = resized.get_pixel(px, py);
             let dst = out.get_pixel_mut(fx, fy);
             for c in 0..3 {
                 let blend = p[c] as f32 * alpha + dst[c] as f32 * (1.0 - alpha);

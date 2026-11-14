@@ -378,9 +378,10 @@ mod tests {
         let samples: Vec<f32> = (0..n)
             .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin() * 0.5)
             .collect();
-        let cfg = FusionConfig::default().with_size(64);
+        let cfg = FusionConfig::default().with_size(128);
 
-        // Same seed -> identical frames.
+        // Same seed -> identical frames (the seed is threaded through and the
+        // latent is reproducible).
         let a = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto)
             .unwrap();
         let b = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto)
@@ -390,22 +391,33 @@ mod tests {
             assert_eq!(fa.as_raw(), fb.as_raw(), "seeded pose should be identical");
         }
 
-        // No seed -> stochastic latent, so frames differ between runs.
-        let c = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto)
-            .unwrap();
-        let d = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto)
-            .unwrap();
-        let diff: u64 = c
-            .iter()
-            .zip(d.iter())
-            .map(|(fc, fd)| {
-                fc.as_raw()
+        // No seed -> stochastic latent. A single pair can coincidentally round
+        // to identical pixels (a near-identity warp), so sample several runs
+        // and require that at least one pair differs.
+        let mut prev: Option<Vec<image::ImageBuffer<Rgba<u8>, Vec<u8>>>> = None;
+        let mut any_diff = false;
+        for _ in 0..8 {
+            let f = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto)
+                .unwrap();
+            if let Some(p) = &prev {
+                let diff: u64 = p
                     .iter()
-                    .zip(fd.as_raw().iter())
-                    .map(|(x, y)| (*x as i64 - *y as i64).unsigned_abs())
-                    .sum::<u64>()
-            })
-            .sum();
-        assert!(diff > 0, "unseeded pose should differ between runs");
+                    .zip(f.iter())
+                    .map(|(fc, fd)| {
+                        fc.as_raw()
+                            .iter()
+                            .zip(fd.as_raw().iter())
+                            .map(|(x, y)| (*x as i64 - *y as i64).unsigned_abs())
+                            .sum::<u64>()
+                    })
+                    .sum();
+                if diff > 0 {
+                    any_diff = true;
+                    break;
+                }
+            }
+            prev = Some(f);
+        }
+        assert!(any_diff, "unseeded pose should differ across runs");
     }
 }
