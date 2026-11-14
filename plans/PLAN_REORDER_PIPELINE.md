@@ -181,3 +181,76 @@ into the warped frame → seam; (b) control points are canonical, not detected.
 - **In-paint quality:** a 2 px feather may still show on high-contrast
   boundaries; revisit if visible.
 - **ExpNet→displacement mapping** remains hand-tuned (unchanged).
+
+---
+
+## Annex — Future improvements (reference only, NOT part of this plan)
+
+The items below are recorded for possible future work and are **intentionally
+out of scope** for this plan. They are **not tasks** and must not be
+implemented as part of Plan 7.
+
+### Eye blinking via a dedicated blink model (option B)
+
+**Problem.** The current pipeline has no eyelid motion. Neither ExpNet nor
+Wav2Lip produces a blink: ExpNet supplies expression coefficients (brows, eyes,
+mouth, chin) but no eyelid closure, and Wav2Lip's non-mouth region is just a
+blurry copy of the input face. A blink is **new imagery** (a closed eyelid),
+which the warp stages cannot create — `warp_cpu` only *displaces* existing
+pixels, and the source face has an open eye with no eyelid texture to reveal.
+
+**Why it does not fit the warp.** Both the expression warp (step 4) and the
+pose warp (step 5) are displacement warps. Squashing the eye region vertically
+yields a *squished eye*, not a closed eyelid.
+
+**Where it fits.** The **region-blend / in-paint mechanism** (step 3,
+`RegionBlend`), which pastes imagery produced by a *model* rather than
+displacing existing pixels. A blink would be a second region:
+
+```
+RegionBlend {
+    src:    <eyelid imagery from the blink model>,
+    dst:    <eye rect, derived from PFLD eye landmarks>,
+    mask:   <eye ellipse>,
+    feather: 2 px,
+}
+```
+
+driven by a **blink schedule** (periodic, ~every 3–5 s, ~150 ms ≈ 2–4 frames at
+25 fps; optionally audio-aware, since blinks cluster at speech pauses) rather
+than by the audio.
+
+**The dedicated blink model (option B).** A small model that takes the eye
+region (from the current frame) and returns the same region with a **closed
+eyelid**. This is the "source" of eyelid pixels that the region blend needs.
+Sketch:
+
+- **Input:** the eye crop (e.g. 64×64 or 96×96), optionally conditioned on a
+  blink amount `t ∈ [0,1]` (0 = open, 1 = closed) for smooth animation.
+- **Output:** the same-size eye crop with the eyelid rendered.
+- **Training data:** eye-region crops labelled open/closed (e.g. from
+  MRL Eye Dataset, CEW, or frames extracted from talking-head video with
+  blink annotations). A simple paired open→closed formulation suffices.
+- **Integration:** run per frame (or only on blink frames), then blend via the
+  generic `RegionBlend` with the eye rect from PFLD landmarks (points 60–67
+  left, 68–75 right). The blink amount `t` drives the schedule.
+
+**Prerequisites already in place.**
+
+- `RegionBlend` is already generic (src/dst/mask/feather), so adding an eye
+  region is a one-line addition — provided Task 4 writes the in-paint as a
+  **region-blend table** rather than mouth-only.
+- PFLD already returns the eye contours and pupils, so the eye rect / mask can
+  be derived from detected landmarks (no hardcoded eye position).
+
+**Alternatives (recorded for completeness).**
+
+- **A. Procedural** — warp nearby skin (brow/cheek) over the eye. Cheapest, but
+  crude (looks like a smudge). No model needed.
+- **C. Full face-reenactment** (LivePortrait / FOMM / face-vid2vid) — the model
+  produces the whole face including blinks, gaze and pose. Best quality, but
+  replaces ExpNet + Audio2Pose + Wav2Lip entirely (a much larger change).
+
+**Scope note.** This annex is **reference only**. It is not implemented in
+Plan 7; the only related action taken in Plan 7 is to keep `RegionBlend`
+generic (so this can be added later without reworking the pipeline).
