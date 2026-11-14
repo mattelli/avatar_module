@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-"""Converts Wav2Lip + ExpNet + Audio2Pose PyTorch checkpoints to ONNX for Burn import.
+"""Converts Wav2Lip + ExpNet + Audio2Pose + PFLD PyTorch checkpoints to ONNX for Burn import.
 
 Plan 5, task 2 — weight conversion pipeline.
 Plan 6, task 4 — Audio2Pose decoder conversion (talking-head head motion).
+Plan 7, task 1 — PFLD landmark model conversion (expression control points).
 
 Downloads/uses:
   .res/wav2lip_gan.pth          (Wav2Lip GAN generator, 435 MB)
   .res/auido2exp_00300-model.pth (SadTalker ExpNet, 34 MB)
   .res/auido2pose_00140-model.pth (SadTalker Audio2Pose CVAE, 91 MB)
+  .res/pfld_checkpoint.pth.tar  (PFLD 98-landmark detector, 7 MB)
 
 Produces (into .res/):
   wav2lip_gan.onnx     — the Wav2Lip generator (audio + face -> mouth patch)
   expnet.onnx          — the ExpNet audio->expression MLP
   pose.onnx            — the Audio2Pose CVAE decoder (audio_emb + z -> pose)
+  pfld.onnx            — the PFLD 98-landmark detector (112x112 -> 98 (x,y))
 
 These .onnx files are then imported by burn-onnx (ModelGen in the wav2lip /
 expnet crate build scripts) into .burnpack records, which the Rust runtime
 loads. This script also prints SHA-256 checksums for reproducibility.
 
-Only the generator / ExpNet / Audio2Pose-decoder are exported — no
-discriminator, no training heads. All run in inference (eval) mode.
+Only the generator / ExpNet / Audio2Pose-decoder / PFLD-backbone are exported —
+no discriminator, no training heads. All run in inference (eval) mode.
 """
 
 import argparse
@@ -396,6 +399,134 @@ def export_pose(model: nn.Module, out: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# PFLD (Practical Facial Landmark Detector, polarisZhao/PFLD-pytorch, WFLW 98)
+# ---------------------------------------------------------------------------
+# Plan 7, task 1 — 98-landmark detector used to place the expression-warp
+# control points on the actual face (replacing the hardcoded canonical points).
+# Input: (B, 3, 112, 112) RGB in 0..1. Output: (B, 196) = 98 * (x, y), each
+# normalized to 0..1. The backbone also returns a feature map (out1) used only
+# by the training-time auxiliary pose head; inference needs only `landmarks`.
+def conv_bn(inp, oup, kernel, stride, padding=1):
+    return nn.Sequential(
+        nn.Conv2d(inp, oup, kernel, stride, padding, bias=False),
+        nn.BatchNorm2d(oup), nn.ReLU(inplace=True))
+
+
+class InvertedResidual(nn.Module):
+    def __init__(self, inp, oup, stride, use_res_connect, expand_ratio=6):
+        super().__init__()
+        self.stride = stride
+        assert stride in [1, 2]
+        self.use_res_connect = use_res_connect
+        self.conv = nn.Sequential(
+            nn.Conv2d(inp, inp * expand_ratio, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(inp * expand_ratio),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inp * expand_ratio, inp * expand_ratio, 3, stride, 1,
+                      groups=inp * expand_ratio, bias=False),
+            nn.BatchNorm2d(inp * expand_ratio),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inp * expand_ratio, oup, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(oup),
+        )
+
+    def forward(self, x):
+        if self.use_res_connect:
+            return x + self.conv(x)
+        return self.conv(x)
+
+
+class PFLDInference(nn.Module):
+    """PFLD backbone: (B,3,112,112) -> (out1, landmarks (B,196))."""
+
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(64)
+
+        self.conv3_1 = InvertedResidual(64, 64, 2, False, 2)
+        self.block3_2 = InvertedResidual(64, 64, 1, True, 2)
+        self.block3_3 = InvertedResidual(64, 64, 1, True, 2)
+        self.block3_4 = InvertedResidual(64, 64, 1, True, 2)
+        self.block3_5 = InvertedResidual(64, 64, 1, True, 2)
+
+        self.conv4_1 = InvertedResidual(64, 128, 2, False, 2)
+        self.conv5_1 = InvertedResidual(128, 128, 1, False, 4)
+        self.block5_2 = InvertedResidual(128, 128, 1, True, 4)
+        self.block5_3 = InvertedResidual(128, 128, 1, True, 4)
+        self.block5_4 = InvertedResidual(128, 128, 1, True, 4)
+        self.block5_5 = InvertedResidual(128, 128, 1, True, 4)
+        self.block5_6 = InvertedResidual(128, 128, 1, True, 4)
+
+        self.conv6_1 = InvertedResidual(128, 16, 1, False, 2)
+
+        self.conv7 = conv_bn(16, 32, 3, 2)
+        self.conv8 = nn.Conv2d(32, 128, 7, 1, 0)
+        # `bn8` is declared upstream but unused in `forward` (a dead parameter
+        # in the released checkpoint); kept so `load_state_dict` accepts it.
+        self.bn8 = nn.BatchNorm2d(128)
+        self.avg_pool1 = nn.AvgPool2d(14)
+        self.avg_pool2 = nn.AvgPool2d(7)
+
+        self.fc = nn.Linear(176, 196)
+
+    def forward(self, x):  # x: (B, 3, 112, 112)
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.conv3_1(x)
+        x = self.block3_2(x)
+        x = self.block3_3(x)
+        x = self.block3_4(x)
+        out1 = self.block3_5(x)
+
+        x = self.conv4_1(out1)
+        x = self.conv5_1(x)
+        x = self.block5_2(x)
+        x = self.block5_3(x)
+        x = self.block5_4(x)
+        x = self.block5_5(x)
+        x = self.block5_6(x)
+        x = self.conv6_1(x)
+
+        x1 = self.avg_pool1(x)
+        x1 = x1.view(x1.size(0), -1)
+        x = self.conv7(x)
+        x2 = self.avg_pool2(x)
+        x2 = x2.view(x2.size(0), -1)
+        x3 = self.relu(self.conv8(x))
+        x3 = x3.view(x3.size(0), -1)
+
+        multi_scale = torch.cat([x1, x2, x3], 1)
+        landmarks = self.fc(multi_scale)
+        return out1, landmarks
+
+
+def load_pfld_state(model: nn.Module, ckpt: dict) -> None:
+    """Loads the PFLD backbone state_dict from the checkpoint.
+
+    The checkpoint stores the backbone under `pfld_backbone` (the auxiliary
+    pose head under `auxiliarynet`, which we do not export).
+    """
+    model.load_state_dict(ckpt["pfld_backbone"])
+
+
+def export_pfld(model: nn.Module, out: Path) -> None:
+    model.eval()
+    dummy = torch.randn(1, 3, 112, 112)
+    torch.onnx.export(
+        model,
+        dummy,
+        str(out),
+        input_names=["input_1"],
+        output_names=["out1", "landmarks"],
+        opset_version=17,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checksum helper
 # ---------------------------------------------------------------------------
 def sha256(path: Path) -> str:
@@ -469,9 +600,11 @@ def main() -> int:
     ap.add_argument("--wav2lip", type=Path, default=None, help="wav2lip_gan.pth path")
     ap.add_argument("--expnet", type=Path, default=None, help="auido2exp_00300-model.pth path")
     ap.add_argument("--pose", type=Path, default=None, help="auido2pose_00140-model.pth path")
+    ap.add_argument("--pfld", type=Path, default=None, help="pfld_checkpoint.pth.tar path")
     ap.add_argument("--skip-wav2lip", action="store_true", help="skip wav2lip export")
     ap.add_argument("--skip-expnet", action="store_true", help="skip expnet export")
     ap.add_argument("--skip-pose", action="store_true", help="skip pose export")
+    ap.add_argument("--skip-pfld", action="store_true", help="skip pfld export")
     args = ap.parse_args()
 
     res = args.res
@@ -479,6 +612,7 @@ def main() -> int:
     wav2lip_ckpt = args.wav2lip or (res / "wav2lip_gan.pth")
     expnet_ckpt = args.expnet or (res / "auido2exp_00300-model.pth")
     pose_ckpt = args.pose or (res / "auido2pose_00140-model.pth")
+    pfld_ckpt = args.pfld or (res / "pfld_checkpoint.pth.tar")
 
     results = {}
 
@@ -520,6 +654,19 @@ def main() -> int:
         export_pose(model, out)
         print(f"wrote {out} ({out.stat().st_size} bytes)")
         results["pose.onnx"] = sha256(out)
+
+    if not args.skip_pfld:
+        if not pfld_ckpt.exists():
+            print(f"missing {pfld_ckpt}", file=sys.stderr)
+            return 1
+        print(f"loading PFLD from {pfld_ckpt}")
+        ckpt = torch.load(pfld_ckpt, map_location="cpu", weights_only=False)
+        model = PFLDInference()
+        load_pfld_state(model, ckpt)
+        out = res / "pfld.onnx"
+        export_pfld(model, out)
+        print(f"wrote {out} ({out.stat().st_size} bytes)")
+        results["pfld.onnx"] = sha256(out)
 
     print("\nSHA-256 checksums:")
     for name, h in results.items():

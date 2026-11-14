@@ -96,8 +96,8 @@ into the warped frame → seam; (b) control points are canonical, not detected.
 > verified). This is required for all tasks in this plan.
 
 ### Task 1 — Convert PFLD to Burn (`.bpk`)
-- Add PFLD to `scripts/convert_weights.py` (or a dedicated script): load
-  `pfld_check/checkpoint.pth.tar`, export `pfld.onnx` (input `input_1
+- Add PFLD to `scripts/convert_weights.py` (done): load
+  `.res/pfld_checkpoint.pth.tar`, export `pfld.onnx` (input `input_1
   [1,3,112,112]`, outputs `out1 [1,64,28,28]` + `landmarks [1,196]`), then
   `onnx2burn` → `.res/models/pfld/pfld.bpk`.
 - Add the model source + checksum to `scripts/README_WEIGHTS.md` and
