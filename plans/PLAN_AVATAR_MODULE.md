@@ -1,19 +1,20 @@
 # Plan 1 — Avatar Module: text → MP4 avatar video (no lip-sync training pipeline)
 
+> **Superseded:** this Plan 1 describes the original classic atlas/wgpu path, which is now
+> removed. See `PLAN_TALKING_HEAD_ONLY.md` for the current talking-head-only architecture.
+
 **References:** `AVATAR_MODULE_REPORT.md` (v3) — this plan implements report §2 (pipeline),
 §3.1–§3.3, §3.6–§3.8, and §3.4 **option b** (deterministic phoneme→viseme mapping).
-The learned lip-sync model is a separate plan: `PLAN_LIPSYNC_TRAINING.md` (report §3.4 Path A,
-§3.5 datasets), which later replaces this plan's task 5 mapping.
 
 **Decisions applied:** Q1=b (deterministic phoneme→viseme lip-sync), Q2=one Cargo workspace
-(`avatar-core` + `avatar-py` + `lipsync-train` placeholder), Q4=Python wrapper in this plan,
+(`avatar-core` + `avatar-py`), Q4=Python wrapper in this plan,
 Q5=pin `openh264` + `aac` (FDK) + `mp4` crate (`muxide` fallback), Q6=local Windows 11 tests
 with AMD GPU.
 
 ## Goals
 
 - **G1** — Cargo workspace `avatar` with crates: `avatar-core` (pipeline), `avatar-py`
-  (Python ≥ 3.10 wrapper), `lipsync-train` (placeholder for Plan 2).
+  (Python ≥ 3.10 wrapper).
 - **G2** — Text input with `<mode>` markers → Piper TTS (embedded `piper-rs`, configurable
   voice model) → WAV. Report §3.2.
 - **G3** — Deterministic phoneme→viseme lip-sync from Piper phoneme timings. Report §3.4 (b).
@@ -59,7 +60,7 @@ engine.render("Hello! <happy> Great news. <sad> It is over.", out="clip.mp4")
 
 | # | Task | Commit message | Ref |
 |---|---|---|---|
-| 1 | `git init` + Cargo workspace skeleton: `avatar-core`, `avatar-py`, `lipsync-train` (placeholder), `cargo test` green | `task1: workspace skeleton` | G1 |
+| 1 | `git init` + Cargo workspace skeleton: `avatar-core`, `avatar-py`, `cargo test` green | `task1: workspace skeleton` | G1 |
 | 2 | Marker parser: scan `<tag>` tokens, split into `(segment, mode)` spans; unknown/missing → neutral; unit tests | `task2: marker parser` | G4, §3.1 |
 | 3 | Piper TTS integration (embedded `piper-rs`): configurable voice model, per-segment synthesis + phoneme timings; subprocess fallback behind feature flag; espeak-ng data bundled for the wheel | `task3: piper tts` | G2, §3.2 |
 | 4 | Audio analysis: WAV read (`hound`), per-frame RMS envelope (40 ms @ 25 fps) → head bob / breathing params; audio feature frames for lip-sync | `task4: audio analysis` | G8, §3.3 |
@@ -95,6 +96,5 @@ engine.render("Hello! <happy> Great news. <sad> It is over.", out="clip.mp4")
 ## Cross-references
 
 - Implements report: `AVATAR_MODULE_REPORT.md` §2, §3.1, §3.2, §3.3, §3.4(b), §3.6, §3.7, §3.8.
-- Companion plan: `PLAN_LIPSYNC_TRAINING.md` — trains the Burn lip-sync model (report §3.4
-  Path A, §3.5 datasets); its trained model replaces task 5's deterministic mapping at runtime
-  (inference on `burn-wgpu`, same renderer inputs).
+- Superseded by: `PLAN_WAV2LIP_EXPNET.md` (talking-head backend) and
+  `PLAN_TALKING_HEAD_ONLY.md` (talking-head only + configurable sizes + Audio2Pose).

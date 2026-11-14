@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/avatar-core",
     "crates/avatar-py",
-    "crates/lipsync-train",
     "crates/wav2lip",
     "crates/expnet",
 ]

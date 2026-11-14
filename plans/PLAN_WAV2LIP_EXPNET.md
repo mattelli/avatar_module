@@ -1,17 +1,15 @@
 # Plan 5 — Wav2Lip + ExpNet combined talking-head backend (Rust / burn-wgpu)
 
 **References:** `AVATAR_MODULE_REPORT.md` (v3) §2 pipeline, §3.1 markers, §3.6 atlas/render,
-§3.7 encode/mux, §3.8 Python wrapper. Companion plans: `PLAN_AVATAR_MODULE.md` (Rust engine),
-`PLAN_SADTALKER_SERVICE.md` (the alternative talking-head backend, which stays a **Python
-service**), `PLAN_LIPSYNC_TRAINING.md` (the Rust engine's existing learned lip-sync, already on
-burn-wgpu).
+§3.7 encode/mux, §3.8 Python wrapper. Companion plan: `PLAN_AVATAR_MODULE.md` (Rust engine).
+Superseded by `PLAN_TALKING_HEAD_ONLY.md` (talking-head only, sizes, Audio2Pose).
 
 **Decisions applied (user-confirmed):**
 - **Integration = complement (1b):** the Rust `avatar-core` engine stays the orchestrator. The
   Wav2Lip + ExpNet models are added as **Rust crates in the same workspace** (`burn-wgpu`), not
   as an external Python service. No full replacement.
 - **Runtime = Rust / burn-wgpu:** both models run as inference-only Rust code on Burn's `wgpu`
-  backend. This reuses the same framework the `lipsync-train` plan already commits to.
+  backend.
 - **GPU with CPU fallback:** primary target is the GPU via `burn-wgpu` (DX12/Vulkan on the AMD
   machine); when no GPU/adapter is available, fall back to Burn's `ndarray` CPU backend. The
   runtime picks the backend automatically.
@@ -42,9 +40,9 @@ reach of Burn:
   Burn supports on the wgpu backend. **Feasible, moderate-to-high effort** — the work is weight
   conversion and layer plumbing, not the math.
 
-The recommended stack is **burn + burn-wgpu** (consistent with `PLAN_LIPSYNC_TRAINING.md`),
-with weights imported via Burn's ONNX importer (`burn-import`). Hand-writing raw WGSL for every
-layer is possible but not recommended (large, fragile, no benefit over Burn).
+The recommended stack is **burn + burn-wgpu**, with weights imported via Burn's ONNX importer
+(`burn-import`). Hand-writing raw WGSL for every layer is possible but not recommended (large,
+fragile, no benefit over Burn).
 
 ## Goals
 
@@ -69,8 +67,8 @@ layer is possible but not recommended (large, fragile, no benefit over Burn).
 - The Rust engine renders text → markers → Piper TTS → viseme lip-sync → expression-atlas warp
   (32/64/128 px) → MP4, entirely in-process.
 - `<happy>`/`<sad>` markers switch expression bands with ~150 ms cross-fade.
-- No Wav2Lip/ExpNet code exists; `lipsync-train` already uses burn-wgpu, so the framework is
-  proven in the workspace.
+- No Wav2Lip/ExpNet code exists (at the time this plan was written); the workspace already
+  uses burn-wgpu, so the framework is proven.
 
 ## Expected behavior
 
@@ -133,8 +131,6 @@ picture ────────────────────────
 ## Cross-references
 
 - Complements: `PLAN_AVATAR_MODULE.md` (Rust engine: TTS, encoder, wrapper stay in place).
-- Framework reuse: `PLAN_LIPSYNC_TRAINING.md` (already uses burn-wgpu in the workspace).
-- Alternative backend: `PLAN_SADTALKER_SERVICE.md` (SadTalker as a **Python service** — the
-  contrast to this plan's all-Rust approach).
+- Superseded by: `PLAN_TALKING_HEAD_ONLY.md` (talking-head only, configurable sizes, Audio2Pose).
 - Report: `AVATAR_MODULE_REPORT.md` §2, §3.1 (markers, now removed), §3.6 (atlas/render,
   superseded for output), §3.7 (encode/mux, reused), §3.8 (Python wrapper).
