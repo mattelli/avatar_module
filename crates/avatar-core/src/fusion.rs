@@ -166,9 +166,9 @@ fn face_points_neutral() -> Vec<ControlPoint> {
 
 /// Blends a Wav2Lip mouth patch into the lower-face region of `frame`.
 ///
-/// The patch (`96×96×3`, values 0..1) is resized to the mask region of the
-/// frame and alpha-blended through a smooth elliptical mask centered on the
-/// mouth. Returns a new frame.
+/// The patch (`[3, 96, 96]` channel-major, values 0..1) is resized to the mask
+/// region of the frame and alpha-blended through a smooth elliptical mask
+/// centered on the mouth. Returns a new frame.
 pub fn blend_mouth(
     frame: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     mouth_patch: &[f32],
@@ -231,19 +231,26 @@ pub fn blend_mouth(
     out
 }
 
-/// Converts a flat 96×96×3 mouth patch (0..1) into an RGBA image.
+/// Converts a flat `[3, 96, 96]` (channel-major, CHW) mouth patch with values
+/// in 0..1 into an RGBA image.
+///
+/// The Wav2Lip model returns channel-first tensors (`[b, 3, 96, 96]`), so the
+/// buffer is laid out as three consecutive 96×96 planes (R, G, B) — **not**
+/// interleaved RGB. Indexing it as HWC interleaves the planes and produces a
+/// tiled/garbled face.
 fn patch_to_image(patch: &[f32]) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    const PLANE: usize = 96 * 96;
     let mut img = ImageBuffer::from_pixel(96, 96, Rgba([0u8, 0, 0, 255]));
     for y in 0..96usize {
         for x in 0..96usize {
-            let i = (y * 96 + x) * 3;
+            let base = y * 96 + x;
             img.put_pixel(
                 x as u32,
                 y as u32,
                 Rgba([
-                    (patch[i].clamp(0.0, 1.0) * 255.0) as u8,
-                    (patch[i + 1].clamp(0.0, 1.0) * 255.0) as u8,
-                    (patch[i + 2].clamp(0.0, 1.0) * 255.0) as u8,
+                    (patch[base].clamp(0.0, 1.0) * 255.0) as u8,
+                    (patch[PLANE + base].clamp(0.0, 1.0) * 255.0) as u8,
+                    (patch[2 * PLANE + base].clamp(0.0, 1.0) * 255.0) as u8,
                     255,
                 ]),
             );
@@ -337,7 +344,8 @@ pub fn pose_warp(
 /// - `exp_coeffs`: 64 ExpNet expression coefficients for this frame.
 /// - `pose`: optional 6 Audio2Pose head-pose coefficients (yaw/pitch/roll +
 ///   tx/ty/tz); `None` applies no pose warp.
-/// - `mouth_patch`: the 96×96×3 Wav2Lip mouth patch (values 0..1).
+/// - `mouth_patch`: the `[3, 96, 96]` (channel-major) Wav2Lip mouth patch
+///   (values 0..1).
 ///
 /// The frame is resized to `cfg.size` at the end.
 pub fn fuse_frame(
@@ -489,5 +497,33 @@ mod tests {
             }
         }
         sum
+    }
+
+    /// Regression: the Wav2Lip patch is channel-major (`[3, 96, 96]`), so a
+    /// patch with a bright R plane and dark G/B planes must render a *red*
+    /// mouth region — not a garbled/tiled or gray one. Indexing the buffer as
+    /// interleaved HWC (the old bug) interleaves the planes and breaks this.
+    #[test]
+    fn patch_channels_are_planar_not_interleaved() {
+        let src = ImageBuffer::from_pixel(128, 128, Rgba([0u8, 0, 0, 255]));
+        let cfg = FusionConfig::default().with_size(128);
+        let neutral = [0.0f32; 64];
+
+        // CHW: plane 0 (R) = 1.0, planes 1 (G) and 2 (B) = 0.0.
+        const PLANE: usize = 96 * 96;
+        let mut patch = vec![0.0f32; 3 * PLANE];
+        patch[..PLANE].fill(1.0);
+
+        let out = fuse_frame(&src, &neutral, None, &patch, &cfg);
+
+        // Sample the center of the mouth mask (bottom-center of the frame).
+        let (fw, fh) = out.dimensions();
+        let p = out.get_pixel(fw / 2, (fh as f32 * 0.85) as u32);
+        assert!(
+            p[0] > 200 && p[1] < 60 && p[2] < 60,
+            "R plane should map to the red channel (got {:?}); \
+             interleaved indexing would mix the planes",
+            p
+        );
     }
 }

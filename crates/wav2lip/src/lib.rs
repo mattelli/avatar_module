@@ -13,7 +13,7 @@
 //!    and builds the 6-channel input: `[masked_face (lower half zeroed),
 //!    full_face]`, normalized to 0..1.
 //! 4. [`Wav2Lip::predict`] runs the generator per chunk and returns the
-//!    96×96×3 mouth patches (0..1).
+//!    `[3, 96, 96]` (channel-major) mouth patches (0..1).
 
 pub mod model;
 
