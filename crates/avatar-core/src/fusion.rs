@@ -52,6 +52,10 @@ const EYE_RIGHT: usize = 6;
 /// Control-point index for the chin.
 const CHIN: usize = 8;
 
+/// Number of expression-warp control points (matches
+/// [`crate::pfld::NUM_CONTROL_POINTS`]).
+pub const NUM_CONTROL_POINTS: usize = 9;
+
 /// Configuration for the fusion stage.
 #[derive(Debug, Clone)]
 pub struct FusionConfig {
@@ -112,12 +116,64 @@ pub struct FusedFrame {
 /// - the tail drives the chin (jaw).
 ///
 /// `strength` scales the displacement; `exp_coeffs` must be 64 long.
+///
+/// The control-point **positions** are the hardcoded canonical ones
+/// ([`face_points_neutral`]). To drive the warp from *detected* landmarks
+/// instead, see [`warp_from_landmarks`].
 pub fn warp_from_coeffs(
     src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     exp_coeffs: &[f32],
     strength: f32,
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
-    let mut pts = face_points_neutral();
+    let positions: Vec<[f32; 2]> = face_points_neutral().iter().map(|cp| cp.pos).collect();
+    warp_from_positions(src, exp_coeffs, &positions, strength)
+}
+
+/// Expression warp driven by **detected** control-point positions.
+///
+/// `landmarks9` are the 9 control points in the order used by
+/// [`crate::pfld::landmarks_to_control_points`] — `[mouth center, mouth left,
+/// mouth right, brow left, brow right, eye left, eye right, nose, chin]` —
+/// normalized to `0..1` on the clean face. The landmark **positions** place the
+/// control points on the actual face; the **displacements** still come from the
+/// (hand-tuned) ExpNet coefficient mapping in [`warp_from_positions`].
+///
+/// This is the Plan 7 replacement for the canonical positions of
+/// [`warp_from_coeffs`]: the 9 points come from PFLD instead of being
+/// hardcoded, so the warp follows the real face geometry.
+pub fn warp_from_landmarks(
+    src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    exp_coeffs: &[f32],
+    landmarks9: &[[f32; 2]],
+    strength: f32,
+) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    debug_assert_eq!(
+        landmarks9.len(),
+        NUM_CONTROL_POINTS,
+        "expected {NUM_CONTROL_POINTS} control points, got {}",
+        landmarks9.len()
+    );
+    warp_from_positions(src, exp_coeffs, landmarks9, strength)
+}
+
+/// Shared expression-warp core: build the 9 control points from the given
+/// **positions** (canonical or detected) and the ExpNet coefficient
+/// **displacements**, then warp `src`.
+///
+/// Only the positions differ between [`warp_from_coeffs`] (canonical) and
+/// [`warp_from_landmarks`] (PFLD-detected); the displacement mapping — the
+/// hand-tuned ExpNet → motion projection — is identical for both.
+fn warp_from_positions(
+    src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    exp_coeffs: &[f32],
+    positions: &[[f32; 2]],
+    strength: f32,
+) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let mut pts: Vec<ControlPoint> = positions
+        .iter()
+        .map(|&pos| ControlPoint { pos, disp: [0.0, 0.0] })
+        .collect();
+
     // Mouth: coeff[0] opens (vertical), coeff[1]/[2] pull the corners.
     let mouth_open = exp_coeffs.first().copied().unwrap_or(0.0).clamp(-1.0, 1.0);
     let mouth_l = exp_coeffs.get(1).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
@@ -497,6 +553,101 @@ mod tests {
         let a = fuse_frame(&src, &c0, None, &dark, &cfg);
         let b = fuse_frame(&src, &c1, None, &dark, &cfg);
         assert!(pixel_diff(&a, &b) > 0.0);
+    }
+
+    /// The 9 detected control points (a plausible face layout).
+    fn sample_landmarks9() -> [[f32; 2]; NUM_CONTROL_POINTS] {
+        [
+            [0.50, 0.72], // mouth center
+            [0.42, 0.70], // mouth left
+            [0.58, 0.70], // mouth right
+            [0.35, 0.45], // brow left
+            [0.65, 0.45], // brow right
+            [0.35, 0.52], // eye left
+            [0.65, 0.52], // eye right
+            [0.50, 0.60], // nose
+            [0.50, 0.88], // chin
+        ]
+    }
+
+    /// T3: a nonzero coefficient changes the frame when the warp is driven by
+    /// detected landmarks (the landmark-driven path is live, not a no-op).
+    #[test]
+    fn landmark_warp_nonzero_coeff_changes_frame() {
+        let src = test_face_cpu(128, 128);
+        let lm = sample_landmarks9();
+
+        let neutral = [0.0f32; 64];
+        let mut coeffs = [0.0f32; 64];
+        coeffs[0] = 1.0; // mouth open
+
+        let a = warp_from_landmarks(&src, &neutral, &lm, 0.5);
+        let b = warp_from_landmarks(&src, &coeffs, &lm, 0.5);
+        assert!(
+            pixel_diff(&a, &b) > 0.0,
+            "nonzero coefficient should change the landmark-driven frame"
+        );
+    }
+
+    /// T3: zero coefficients are the identity (no displacement => no change).
+    #[test]
+    fn landmark_warp_neutral_is_identity() {
+        let src = test_face_cpu(128, 128);
+        let lm = sample_landmarks9();
+        let neutral = [0.0f32; 64];
+        let out = warp_from_landmarks(&src, &neutral, &lm, 0.5);
+        assert_eq!(out.dimensions(), src.dimensions());
+        assert_eq!(
+            pixel_diff(&src, &out),
+            0.0,
+            "zero coefficients should leave the frame unchanged"
+        );
+    }
+
+    /// T3: the warp is bounded — extreme coefficients and extreme landmark
+    /// positions still return a same-sized frame without panicking.
+    #[test]
+    fn landmark_warp_is_bounded() {
+        let src = test_face_cpu(64, 64);
+        // Landmarks pushed to the corners (worst case).
+        let lm = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [0.0, 0.5],
+            [1.0, 0.5],
+            [0.5, 0.0],
+            [0.5, 1.0],
+            [0.0, 0.0],
+        ];
+        let extreme = [1.0f32; 64];
+        let out = warp_from_landmarks(&src, &extreme, &lm, 1.0);
+        assert_eq!(out.dimensions(), src.dimensions());
+    }
+
+    /// T3: the *positions* are actually used — the same coefficients with two
+    /// different landmark sets produce different frames (this is the whole
+    /// point of replacing the canonical points with detected ones).
+    #[test]
+    fn landmark_positions_drive_the_warp() {
+        let src = test_face_cpu(128, 128);
+        let mut coeffs = [0.0f32; 64];
+        coeffs[0] = 1.0; // mouth open
+
+        let lm_a = sample_landmarks9();
+        // Shift the mouth control points to a different place.
+        let mut lm_b = sample_landmarks9();
+        lm_b[0] = [0.30, 0.60];
+        lm_b[1] = [0.22, 0.58];
+        lm_b[2] = [0.38, 0.58];
+
+        let a = warp_from_landmarks(&src, &coeffs, &lm_a, 0.5);
+        let b = warp_from_landmarks(&src, &coeffs, &lm_b, 0.5);
+        assert!(
+            pixel_diff(&a, &b) > 0.0,
+            "different landmark positions should produce different warps"
+        );
     }
 
     /// Neutral coeffs + a black mouth patch darken the mouth mask region.
