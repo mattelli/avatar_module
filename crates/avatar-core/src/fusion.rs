@@ -133,19 +133,28 @@ fn warp_from_positions(
     // Chin: coeff[7] opens the jaw (down).
     let chin = exp_coeffs.get(7).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
 
+    // Gain calibration: ExpNet emits *normalized* 3DMM coefficients whose
+    // per-clip range is small (measured on a 1 s clip: mouth 0.21, brow 0.11,
+    // eye 0.17, chin 0.10 peak-to-peak). The old gains (0.008–0.02) were tuned
+    // as if the coefficients were ~1.0, producing sub-pixel (<0.25 px) motion —
+    // invisible. The gains below are scaled so a typical coefficient range
+    // yields a visible ~2–3 px shift at the 112×112 expression resolution
+    // (`shift = coeff · gain · strength · size`, size 112, strength 0.5).
+    //
+    // Mouth: coeff[0] opens (vertical), coeff[1]/[2] pull the corners.
     // Mouth center down/up with the opening.
-    pts[MOUTH_CENTER].disp = [0.0, -mouth_open * 0.02];
+    pts[MOUTH_CENTER].disp = [0.0, -mouth_open * 0.25];
     // Mouth corners: spread out and slightly up when open.
-    pts[MOUTH_LEFT].disp = [-mouth_open * 0.012, -mouth_l * 0.02];
-    pts[MOUTH_RIGHT].disp = [mouth_open * 0.012, -mouth_r * 0.02];
+    pts[MOUTH_LEFT].disp = [-mouth_open * 0.15, -mouth_l * 0.25];
+    pts[MOUTH_RIGHT].disp = [mouth_open * 0.15, -mouth_r * 0.25];
     // Brows: raise (negative coeff => up). Map positive brow activation to up.
-    pts[BROW_LEFT].disp = [0.0, -brow_l * 0.015];
-    pts[BROW_RIGHT].disp = [0.0, -brow_r * 0.015];
+    pts[BROW_LEFT].disp = [0.0, -brow_l * 0.40];
+    pts[BROW_RIGHT].disp = [0.0, -brow_r * 0.40];
     // Eyes: squint pulls the upper eyelid down (positive => down).
-    pts[EYE_LEFT].disp = [0.0, eye_l * 0.008];
-    pts[EYE_RIGHT].disp = [0.0, eye_r * 0.008];
+    pts[EYE_LEFT].disp = [0.0, eye_l * 0.25];
+    pts[EYE_RIGHT].disp = [0.0, eye_r * 0.25];
     // Chin: down (open jaw).
-    pts[CHIN].disp = [0.0, chin * 0.02];
+    pts[CHIN].disp = [0.0, chin * 0.40];
 
     let params = WarpParams {
         strength,
@@ -306,6 +315,61 @@ mod tests {
             pixel_diff(&a, &b) > 0.0,
             "nonzero coefficient should change the landmark-driven frame"
         );
+    }
+
+    /// Regression (invisible expression): ExpNet emits *small* normalized
+    /// coefficients (per-clip range ~0.1–0.3). With the old gains those gave
+    /// sub-pixel (<0.25 px) motion — invisible. The calibrated gains must make
+    /// realistic coefficients move the frame *visibly* (several px at 112).
+    #[test]
+    fn realistic_expression_moves_frame_visibly() {
+        // High-contrast source so a small displacement is measurable.
+        let src = checkerboard(112, 112);
+        let lm = sample_landmarks9();
+
+        // Two frames' worth of realistic measured coefficients.
+        let mut c0 = [0.0f32; 64];
+        let mut c1 = [0.0f32; 64];
+        c0[0] = 0.058; // mouth open
+        c0[3] = -0.043; // brow left
+        c0[5] = -0.161; // eye left
+        c0[7] = -0.017; // chin
+        c1[0] = 0.153;
+        c1[3] = -0.150;
+        c1[5] = -0.328;
+        c1[7] = -0.112;
+
+        let a = warp_from_landmarks(&src, &c0, &lm, 0.5);
+        let b = warp_from_landmarks(&src, &c1, &lm, 0.5);
+
+        // Mean absolute difference per channel over the whole frame.
+        let mut sum = 0.0f64;
+        let mut n = 0.0f64;
+        for (p, q) in a.pixels().zip(b.pixels()) {
+            for c in 0..3 {
+                sum += (p[c] as f64 - q[c] as f64).abs();
+                n += 1.0;
+            }
+        }
+        let mean = sum / n;
+        assert!(
+            mean > 5.0,
+            "realistic expression should visibly move the frame \
+             (mean diff {mean:.2}/255); the expression-warp gains are probably \
+             too small"
+        );
+    }
+
+    /// A white/black 4 px checkerboard (high contrast for displacement tests).
+    fn checkerboard(w: u32, h: u32) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+        let mut img = ImageBuffer::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = if ((x / 4) + (y / 4)) % 2 == 0 { 255u8 } else { 0u8 };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        img
     }
 
     /// T3: zero coefficients are the identity (no displacement => no change).
