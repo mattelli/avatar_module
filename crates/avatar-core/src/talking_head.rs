@@ -82,6 +82,13 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     out
 }
 
+/// Number of video frames for `n_samples` of audio at `sample_rate`, rendered
+/// at `fps`. Always at least 1 (a non-empty clip yields at least one frame).
+fn frame_count(n_samples: usize, sample_rate: u32, fps: f32) -> usize {
+    let secs = n_samples as f32 / sample_rate as f32;
+    ((secs * fps) as usize).max(1)
+}
+
 /// Renders the talking-head frames for a clip.
 ///
 /// - `samples` / `sr`: the TTS audio (at Piper's rate; resampled internally).
@@ -91,8 +98,11 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 ///   latent `z ~ N(0,1)` per render (stochastic head motion); `Some(seed)` =
 ///   reproducible head motion. Head pose is always applied (audio-driven).
 /// - `backend_pref`: optional backend override (defaults to Auto).
+/// - `fps`: output video frame rate. Wav2Lip was trained at 25 fps; other
+///   rates change the frame count and the mel-window stride (see
+///   [`wav2lip::mel_chunks`]). Values `<= 0` fall back to 25.
 ///
-/// Returns the RGBA frames, one per 25 fps video frame, at `cfg.size`.
+/// Returns the RGBA frames, one per `fps` video frame, at `cfg.size`.
 pub fn render_talking_head(
     samples: &[f32],
     sr: u32,
@@ -100,7 +110,10 @@ pub fn render_talking_head(
     cfg: &FusionConfig,
     pose_seed: Option<u64>,
     backend_pref: BackendPreference,
+    fps: f32,
 ) -> Result<Vec<ImageBuffer<Rgba<u8>, Vec<u8>>>> {
+    let fps = if fps > 0.0 { fps } else { FPS };
+
     // 1. Resample to the model rate.
     let samples16k = resample(samples, sr, MODEL_SAMPLE_RATE);
     anyhow::ensure!(!samples16k.is_empty(), "no audio to render");
@@ -109,9 +122,8 @@ pub fn render_talking_head(
     let mel = expnet::mel::melspectrogram(&samples16k);
     anyhow::ensure!(mel.n_frames > 0, "empty mel spectrogram");
 
-    // Video frame count (25 fps).
-    let video_frames = (samples16k.len() as f32 / MODEL_SAMPLE_RATE as f32 * FPS) as usize;
-    let video_frames = video_frames.max(1);
+    // Video frame count at the requested rate.
+    let video_frames = frame_count(samples16k.len(), MODEL_SAMPLE_RATE, fps);
 
     // 3. Load model weights.
     let dir = models_dir().context("no .res/models directory found")?;
@@ -155,7 +167,7 @@ pub fn render_talking_head(
     let coeffs = expnet.predict(&mel, video_frames).context("expnet predict")?;
 
     // 5. Mel chunks + mouth patches (Wav2Lip).
-    let chunks = wav2lip::mel_chunks(&mel);
+    let chunks = wav2lip::mel_chunks(&mel, fps);
     anyhow::ensure!(!chunks.is_empty(), "no wav2lip mel chunks");
     let chunk_frames = chunks.len();
 
@@ -327,6 +339,19 @@ mod tests {
         assert!(y.iter().all(|v| *v == 0.0));
     }
 
+    /// `frame_count` scales linearly with fps: a 2 s clip at 16 kHz gives
+    /// `2 s × fps` frames (and at least 1 for a non-empty clip).
+    #[test]
+    fn frame_count_scales_with_fps() {
+        let sr = MODEL_SAMPLE_RATE;
+        let two_secs = (2.0 * sr as f32) as usize;
+        assert_eq!(frame_count(two_secs, sr, 25.0), 50);
+        assert_eq!(frame_count(two_secs, sr, 16.0), 32);
+        assert_eq!(frame_count(two_secs, sr, 10.0), 20);
+        // Non-empty audio always yields at least one frame.
+        assert_eq!(frame_count(1, sr, 16.0), 1);
+    }
+
     #[test]
     fn resample_interpolates() {
         // Linear ramp: resampling preserves the endpoints and is within range.
@@ -376,7 +401,7 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(128);
-        let frames = render_talking_head(&samples, sr, None, &cfg, Some(42), BackendPreference::Auto).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, Some(42), BackendPreference::Auto, 25.0).unwrap();
         assert_eq!(frames.len(), 5);
         for f in &frames {
             assert_eq!(f.dimensions(), (cfg.size, cfg.size));
@@ -403,8 +428,8 @@ mod tests {
         };
         let cfg = FusionConfig::default().with_size(128);
 
-        let a = render_talking_head(&sine(440.0), sr, None, &cfg, Some(1), BackendPreference::Auto).unwrap();
-        let b = render_talking_head(&sine(880.0), sr, None, &cfg, Some(1), BackendPreference::Auto).unwrap();
+        let a = render_talking_head(&sine(440.0), sr, None, &cfg, Some(1), BackendPreference::Auto, 25.0).unwrap();
+        let b = render_talking_head(&sine(880.0), sr, None, &cfg, Some(1), BackendPreference::Auto, 25.0).unwrap();
         assert_eq!(a.len(), b.len());
 
         // Different audio -> different frames (mouth/expression differ).
@@ -448,7 +473,7 @@ mod tests {
 
         let cfg = FusionConfig::default().with_size(256);
         let frames =
-            render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto).unwrap();
+            render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto, 25.0).unwrap();
         assert!(frames.len() >= 4);
 
         // Mean absolute difference between consecutive frames over the whole
@@ -507,6 +532,7 @@ mod tests {
             &cfg,
             Some(7),
             BackendPreference::Auto,
+            25.0,
         )
         .unwrap();
         let frame = &frames[frames.len() / 2];
@@ -563,11 +589,11 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(256);
-        let frames = render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto, 25.0).unwrap();
         assert_eq!(frames.len(), 3);
 
         let out = std::env::temp_dir().join("avatar_t11_talking_head.mp4");
-        crate::encoder::encode_and_mux(&out, &frames, &samples, sr, 1).unwrap();
+        crate::encoder::encode_and_mux(&out, &frames, &samples, sr, 1, 25.0).unwrap();
         let size = std::fs::metadata(&out).unwrap().len();
         assert!(size > 1000, "mp4 too small: {size}");
 
@@ -613,9 +639,9 @@ mod tests {
 
         // Same seed -> identical frames (the seed is threaded through and the
         // latent is reproducible).
-        let a = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto)
+        let a = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto, 25.0)
             .unwrap();
-        let b = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto)
+        let b = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto, 25.0)
             .unwrap();
         assert_eq!(a.len(), b.len());
         for (fa, fb) in a.iter().zip(b.iter()) {
@@ -628,7 +654,7 @@ mod tests {
         let mut prev: Option<Vec<image::ImageBuffer<Rgba<u8>, Vec<u8>>>> = None;
         let mut any_diff = false;
         for _ in 0..8 {
-            let f = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto)
+            let f = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto, 25.0)
                 .unwrap();
             if let Some(p) = &prev {
                 let diff: u64 = p

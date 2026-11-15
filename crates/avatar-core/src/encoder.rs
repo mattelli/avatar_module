@@ -409,17 +409,19 @@ pub fn mux_mp4(
     Ok(())
 }
 
-/// Convenience: encodes RGBA frames + PCM audio and muxes to MP4.
+/// Convenience: encodes RGBA frames + PCM audio and muxes to MP4 at `video_fps`.
 pub fn encode_and_mux(
     out: &Path,
     frames: &[image::ImageBuffer<Rgba<u8>, Vec<u8>>],
     audio_samples: &[f32],
     audio_sample_rate: u32,
     audio_channels: u16,
+    video_fps: f32,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+    let video_fps = if video_fps > 0.0 { video_fps } else { FPS };
     let (w, h) = frames[0].dimensions();
-    let mut video = H264Encoder::new(w, h, FPS)?;
+    let mut video = H264Encoder::new(w, h, video_fps)?;
     // Encode once, tracking the exact byte range of each frame so the muxer
     // can emit one MP4 sample per real frame (no NAL-count guessing).
     let (bitstream, ranges) = video.encode_rgba_ranges(frames)?;
@@ -441,7 +443,7 @@ pub fn encode_and_mux(
         &aac,
         audio_sample_rate,
         audio_channels,
-        FPS,
+        video_fps,
     )
 }
 
@@ -581,7 +583,7 @@ mod tests {
         let audio: Vec<f32> = (0..n_audio)
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / sr as f32).sin() * 0.3)
             .collect();
-        encode_and_mux(&tmp, &frames, &audio, sr, 1).unwrap();
+        encode_and_mux(&tmp, &frames, &audio, sr, 1, FPS).unwrap();
 
         // Parse the result.
         let file = std::fs::File::open(&tmp).unwrap();

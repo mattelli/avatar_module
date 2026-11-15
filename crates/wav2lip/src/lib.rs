@@ -34,8 +34,8 @@ pub const MEL_STEP: usize = 16;
 /// Audio-embedding dimension (the Wav2Lip audio encoder output, consumed by
 /// Audio2Pose — Plan 6).
 pub const AUDIO_EMB_DIM: usize = 512;
-/// `mel_idx_multiplier = 80 / fps` (80 mel frames/sec at 16 kHz, 25 fps video).
-const MEL_IDX_MULTIPLIER: f32 = 80.0 / 25.0;
+/// Mel frames per second: 16 kHz with a 200-sample hop → 80 columns/sec.
+pub const MEL_FRAMES_PER_SEC: f32 = 80.0;
 /// Face pad: Wav2Lip default `pads = [0, 10, 0, 0]` -> (pady1, pady2, padx1, padx2).
 const PADS: (i64, i64, i64, i64) = (0, 10, 0, 0);
 
@@ -195,15 +195,23 @@ pub struct FaceInput {
 
 /// Slices the mel spectrogram into 16-column chunks, one per video frame.
 ///
-/// Mirrors `inference.py`: `start_idx = int(i * 80/25)`; the last chunk uses
-/// the final 16 columns when it would run past the end. `mel` is the
-/// SadTalker mel matrix (`n_frames × 80`, from `expnet::mel::melspectrogram`).
-pub fn mel_chunks(mel: &expnet::mel::MelSpectrogram) -> Vec<MelChunk> {
+/// Mirrors `inference.py`: `start_idx = int(i * mel_frames_per_sec / fps)`;
+/// the last chunk uses the final 16 columns when it would run past the end.
+/// `mel` is the SadTalker mel matrix (`n_frames × 80`, from
+/// `expnet::mel::melspectrogram`).
+///
+/// `fps` is the video frame rate: the mel window advances by
+/// [`MEL_FRAMES_PER_SEC`]` / fps` columns per frame. Wav2Lip was trained at
+/// 25 fps; at other rates lip-sync timing shifts slightly but stays aligned
+/// to the audio (the window is still selected from the audio's mel).
+pub fn mel_chunks(mel: &expnet::mel::MelSpectrogram, fps: f32) -> Vec<MelChunk> {
     let n_cols = mel.n_frames;
+    let fps = if fps > 0.0 { fps } else { 25.0 };
+    let mel_idx_multiplier = MEL_FRAMES_PER_SEC / fps;
     let mut chunks = Vec::new();
     let mut i = 0usize;
     loop {
-        let start = (i as f32 * MEL_IDX_MULTIPLIER) as usize;
+        let start = (i as f32 * mel_idx_multiplier) as usize;
         if start + MEL_STEP > n_cols {
             // Last chunk: use the final 16 columns.
             let last_start = n_cols.saturating_sub(MEL_STEP);
@@ -353,7 +361,7 @@ mod tests {
     #[test]
     fn mel_chunks_match_reference() {
         let mel = expnet::mel::melspectrogram(&sine(440.0));
-        let chunks = mel_chunks(&mel);
+        let chunks = mel_chunks(&mel, 25.0);
         // 1 s audio -> 81 mel frames; the reference `inference.py` loop
         // terminates when int(i*3.2)+16 > 81, i.e. at i=21 (start=67), giving
         // 22 chunks. Starts: [0,3,6,...,64,67].
@@ -363,6 +371,18 @@ mod tests {
             80 * MEL_STEP,
             "chunk width must be 80x16"
         );
+    }
+
+    /// A lower fps advances the mel window faster per frame, so fewer chunks
+    /// (fewer video frames) cover the same audio.
+    #[test]
+    fn mel_chunks_scale_with_fps() {
+        let mel = expnet::mel::melspectrogram(&sine(440.0));
+        let at_25 = mel_chunks(&mel, 25.0).len();
+        let at_16 = mel_chunks(&mel, 16.0).len();
+        let at_10 = mel_chunks(&mel, 10.0).len();
+        assert!(at_16 < at_25, "16 fps should need fewer chunks than 25");
+        assert!(at_10 < at_16, "10 fps should need fewer chunks than 16");
     }
 
     /// T4: face_input builds a 6-channel 96×96 tensor with the lower half of
@@ -385,7 +405,7 @@ mod tests {
     /// FIRST mel chunk so tests run 1 forward pass (~16 s on CPU flex).
     fn first_chunk(freq: f32) -> MelChunk {
         let mel = expnet::mel::melspectrogram(&sine(freq));
-        mel_chunks(&mel).remove(0)
+        mel_chunks(&mel, 25.0).remove(0)
     }
 
     /// T4: the Wav2Lip model runs on synthetic audio + a synthetic face on

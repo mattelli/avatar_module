@@ -39,6 +39,9 @@ pub struct EngineConfig {
     /// Speech speed multiplier (default `1.0`). `< 1.0` = slower, `> 1.0` =
     /// faster. Mapped to Piper's `length_scale` as `1 / speech_speed`.
     pub speech_speed: f32,
+    /// Output video frame rate (default 25.0). Wav2Lip was trained at 25 fps;
+    /// other rates change the frame count and the mel-window stride.
+    pub fps: f32,
 }
 
 /// Backend selection for the talking-head path.
@@ -83,6 +86,7 @@ impl EngineConfig {
             backend: None,
             pose_seed: None,
             speech_speed: 1.0,
+            fps: crate::analysis::FPS,
         }
     }
 
@@ -134,6 +138,14 @@ impl EngineConfig {
     /// `1.0` = the voice model's native rate (default). Must be positive.
     pub fn with_speech_speed(mut self, speed: f32) -> Self {
         self.speech_speed = speed;
+        self
+    }
+
+    /// Sets the output video frame rate (default 25.0). Wav2Lip was trained at
+    /// 25 fps; other rates change the frame count and the mel-window stride.
+    /// Must be positive.
+    pub fn with_fps(mut self, fps: f32) -> Self {
+        self.fps = fps;
         self
     }
 }
@@ -230,6 +242,11 @@ pub fn render_with_stats(
 
     // 3. Talking-head path (Plan 5, tasks 8-9): Wav2Lip + ExpNet fused
     //    frames at the configured `cfg.size` output.
+    anyhow::ensure!(
+        cfg.fps > 0.0 && cfg.fps.is_finite(),
+        "fps must be a positive finite number, got {}",
+        cfg.fps
+    );
     let fcfg = crate::fusion::FusionConfig::default()
         .with_size(cfg.size)
         .with_strength(cfg.strength);
@@ -244,12 +261,13 @@ pub fn render_with_stats(
         &fcfg,
         cfg.pose_seed, // Audio2Pose latent seed (Plan 6, task 7)
         pref,
+        cfg.fps,
     )
     .context("talking-head render")?;
     anyhow::ensure!(!clip.is_empty(), "talking-head produced no frames");
 
     // 4. Encode + mux.
-    encoder::encode_and_mux(out, &clip, &samples, sr, 1)?;
+    encoder::encode_and_mux(out, &clip, &samples, sr, 1, cfg.fps)?;
 
     Ok((clip.len(), t0.elapsed()))
 }

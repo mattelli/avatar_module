@@ -25,7 +25,7 @@ fn bench(pref: BackendPreference, label: &str, secs: f32) {
 
     let cfg = FusionConfig::default().with_size(256);
     let t0 = Instant::now();
-    let frames = render_talking_head(&samples, sr, Some(&pic_path), &cfg, None, pref).unwrap();
+    let frames = render_talking_head(&samples, sr, Some(&pic_path), &cfg, None, pref, 25.0).unwrap();
     let dt = t0.elapsed();
     let per = dt.as_secs_f64() / frames.len().max(1) as f64;
     println!(

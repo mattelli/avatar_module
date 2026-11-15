@@ -18,6 +18,10 @@ Options:
     --wgpu                use the GPU (burn-wgpu) instead of the default CPU
                           backend (the CPU is faster for these small models on
                           integrated GPUs — see PERF_NOTES.md)
+    --fps N               output video frame rate (default 16). Wav2Lip was
+                          trained at 25 fps; other rates change the frame count
+                          and the mel-window stride (lip timing stays aligned
+                          to the audio)
 
 Dependencies (all optional, graceful fallback):
     - OpenCV (cv2): video playback + frame dumping
@@ -159,6 +163,7 @@ def main() -> None:
     parser.add_argument("--size", type=int, default=128, choices=[64, 128, 256, 512], help="output size in px (default 256)")
     parser.add_argument("--pose-seed", type=int, default=None, help="Audio2Pose latent seed for reproducible head motion (default: stochastic)")
     parser.add_argument("--wgpu", action="store_true", help="use the GPU (burn-wgpu) instead of the default CPU backend")
+    parser.add_argument("--fps", type=float, default=16.0, help="output video frame rate (default 16)")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -173,6 +178,7 @@ def main() -> None:
         face_crop_margin=0.35,  # margin around the face box
         backend="gpu" if args.wgpu else "auto",  # default CPU; --wgpu forces burn-wgpu
         pose_seed=args.pose_seed,  # None = stochastic head motion; int = reproducible
+        fps=args.fps,          # output video frame rate
     )
     text = "Hello, how can I help you today? Let me know if you have any questions."  # markers are stripped; audio-driven expression
     t0 = time.perf_counter()
