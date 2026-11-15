@@ -51,7 +51,7 @@ picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ fa
 ## Building
 
 ```bash
-cargo test                 # 92 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
+cargo test                 # 93 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
 ```
 
 The Python wheel (one wheel for all Python ≥ 3.10 thanks to abi3):

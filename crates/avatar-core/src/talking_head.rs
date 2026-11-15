@@ -191,32 +191,36 @@ pub fn render_talking_head(
         .predict(&chunks, &faces)
         .context("wav2lip predict")?;
 
-    // 9. Step 3: expression warp on the clean Wav2Lip face, driven by PFLD
-    //    landmarks. The face is resized to 112×112 (PFLD's input), the 98
-    //    landmarks are detected and mapped to 9 control points, and the
-    //    per-frame ExpNet coefficients drive the displacement.
-    let face96 = patch_to_image(&patches[0]);
-    let face112 = image::imageops::resize(
-        &face96,
-        EXPR_SIZE,
-        EXPR_SIZE,
-        image::imageops::FilterType::Triangle,
-    );
-    let landmarks9 = detect_control_points(&pfld, &face112)?;
-    let mut expr_faces = Vec::with_capacity(video_frames);
-    for i in 0..video_frames {
-        let coeff_row = &coeffs[i * 64..(i + 1) * 64];
-        let warped = warp_from_landmarks(&face112, coeff_row, &landmarks9, cfg.strength);
-        expr_faces.push(warped);
-    }
-
-    // 10. Steps 4–6: per frame, in-paint the warped face back into the square,
-    //     apply the head-pose warp to the whole frame, then resize.
+    // 9. Steps 3–6: one frame per video frame. Each frame uses **its own**
+    //    Wav2Lip patch (one per mel chunk) — the mouth must follow the audio
+    //    window for that frame, not a single reused face. Per frame:
+    //      step 3: 96×96 patch → 112×112, PFLD landmarks → expression warp;
+    //      step 4: 112×112 → M×M, in-paint into the N×N square;
+    //      step 5: head-pose warp on the whole frame;
+    //      step 6: resize to the requested output size.
     let mut frames = Vec::with_capacity(video_frames);
-    for (i, expr_face) in expr_faces.iter().enumerate() {
+    for i in 0..video_frames {
+        // The Wav2Lip patch for this frame's audio window (chunks ≈ frames;
+        // index clamped). Using `patches[0]` for every frame would freeze the
+        // mouth — the per-chunk patches carry the lip motion.
+        let chunk_idx = i.min(chunk_frames.saturating_sub(1));
+        let face96 = patch_to_image(&patches[chunk_idx]);
+        let face112 = image::imageops::resize(
+            &face96,
+            EXPR_SIZE,
+            EXPR_SIZE,
+            image::imageops::FilterType::Triangle,
+        );
+
+        // Step 3: PFLD landmarks on this (clean, unwarped) Wav2Lip face, then
+        // the expression warp driven by the ExpNet coefficients.
+        let landmarks9 = detect_control_points(&pfld, &face112)?;
+        let coeff_row = &coeffs[i * 64..(i + 1) * 64];
+        let expr_face = warp_from_landmarks(&face112, coeff_row, &landmarks9, cfg.strength);
+
         // Step 4: resize 112×112 → M×M and paste into the N×N square.
         let face_m = image::imageops::resize(
-            expr_face,
+            &expr_face,
             rect.w,
             rect.h,
             image::imageops::FilterType::Triangle,
@@ -419,6 +423,59 @@ mod tests {
             })
             .sum();
         assert!(diff > 1e-3, "different audio should produce different frames");
+    }
+
+    /// Regression (frozen mouth): each frame must use **its own** Wav2Lip patch
+    /// (one per mel chunk), not a single reused face. With a speech-like clip
+    /// the mouth region must change materially from frame to frame. The old bug
+    /// (`patch_to_image(&patches[0])` for every frame) left the mouth nearly
+    /// static. Skips when weights are absent.
+    #[test]
+    fn talking_head_mouth_moves_across_frames() {
+        if !models_present() {
+            return;
+        }
+        let sr = MODEL_SAMPLE_RATE;
+        let n = (0.5 * sr as f32) as usize; // 12 frames
+        // Amplitude-modulated tone: the mouth should move a lot.
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                let env = 0.5 + 0.5 * (2.0 * std::f32::consts::PI * 3.0 * t).sin();
+                (2.0 * std::f32::consts::PI * 180.0 * t).sin() * env * 0.5
+            })
+            .collect();
+
+        let cfg = FusionConfig::default().with_size(256);
+        let frames =
+            render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto).unwrap();
+        assert!(frames.len() >= 4);
+
+        // Mean absolute difference between consecutive frames over the whole
+        // frame. The frozen-mouth bug gave ~0.017/255; the fix gives ~0.36/255.
+        let mean_abs = |a: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+                        b: &ImageBuffer<Rgba<u8>, Vec<u8>>| -> f64 {
+            let mut s = 0.0f64;
+            let mut c = 0.0f64;
+            for (p, q) in a.pixels().zip(b.pixels()) {
+                for ch in 0..3 {
+                    s += (p[ch] as f64 - q[ch] as f64).abs();
+                    c += 1.0;
+                }
+            }
+            s / c
+        };
+        let avg: f64 = frames
+            .windows(2)
+            .map(|w| mean_abs(&w[0], &w[1]))
+            .sum::<f64>()
+            / (frames.len() - 1) as f64;
+
+        assert!(
+            avg > 0.1,
+            "frames are nearly static (avg consecutive diff {avg:.4}/255) — \
+             the per-frame Wav2Lip patch is probably not being used"
+        );
     }
 
     /// Plan 7, task 6: the reordered pipeline has **no in-paint seam**. Renders
