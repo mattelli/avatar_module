@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod atlas;
 pub mod encoder;
 pub mod face_crop;
+pub mod inpaint;
 pub mod markers;
 pub mod pipeline;
 pub mod tts;
