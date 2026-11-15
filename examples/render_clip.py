@@ -15,6 +15,9 @@ Options:
     --size N              output size in px: 64, 128, 256, or 512 (default 256)
     --pose-seed N         Audio2Pose latent seed for reproducible head motion
                           (default: stochastic head motion per render)
+    --wgpu                use the GPU (burn-wgpu) instead of the default CPU
+                          backend (the CPU is faster for these small models on
+                          integrated GPUs — see PERF_NOTES.md)
 
 Dependencies (all optional, graceful fallback):
     - OpenCV (cv2): video playback + frame dumping
@@ -152,8 +155,9 @@ def main() -> None:
     parser.add_argument("--save-frame", default=None, help="path for the dumped frame (default: frame_N.png)")
     parser.add_argument("--scale", type=int, default=1, help="upscale factor for display/dump (default 1)")
     parser.add_argument("--no-audio", action="store_true", help="disable audio playback")
-    parser.add_argument("--size", type=int, default=256, choices=[64, 128, 256, 512], help="output size in px (default 256)")
+    parser.add_argument("--size", type=int, default=128, choices=[64, 128, 256, 512], help="output size in px (default 256)")
     parser.add_argument("--pose-seed", type=int, default=None, help="Audio2Pose latent seed for reproducible head motion (default: stochastic)")
+    parser.add_argument("--wgpu", action="store_true", help="use the GPU (burn-wgpu) instead of the default CPU backend")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -162,12 +166,14 @@ def main() -> None:
         voice_model=str(MODEL),
         picture=str(PICTURE),
         size=args.size,
-        strength=0.5,
+        speech_speed=0.85,
+        strength=0.25,        # pose wrapper strength
         face_crop=True,        # center-crop to the detected face
         face_crop_margin=0.35,  # margin around the face box
+        backend="gpu" if args.wgpu else "auto",  # default CPU; --wgpu forces burn-wgpu
         pose_seed=args.pose_seed,  # None = stochastic head motion; int = reproducible
     )
-    text = "Hello world. Great news. It is over."  # markers are stripped; audio-driven expression
+    text = "Sitting on a dock in Ohio, a big brown bear bit a boat."  # markers are stripped; audio-driven expression
     frames = engine.render(text, str(out))
     print(f"wrote {frames} frames to {out}")
 

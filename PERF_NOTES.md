@@ -1,7 +1,23 @@
 # Performance notes (Plan 5, task 10; updated Plan 6, task 7; Plan 7, task 6)
 
-Measurements on the dev machine (Windows 11, AMD, burn-wgpu via DX12/Vulkan,
-burn-flex CPU fallback), debug build.
+Measurements on the dev machine (Windows 11, AMD **integrated** GPU,
+burn-wgpu via DX12/Vulkan, burn-flex CPU fallback).
+
+## Backend choice: CPU by default (Plan 7 follow-up)
+
+`BackendPreference::Auto` selects the **CPU**. These models are small and
+burn-wgpu's per-op kernel-launch + host↔device sync overhead dominates, so on
+an integrated GPU the GPU path is **slower** than CPU. Measured (release build,
+3 s clip → 75 frames at 256×256, `avatar.jpg`):
+
+| Backend | Full render | Wav2Lip / chunk | PFLD / call |
+|---------|-------------|-----------------|-------------|
+| **CPU (burn-flex, Auto)** | **14.3 s** | **153 ms** | **14 ms** |
+| GPU (burn-wgpu, integrated) | 54.2 s | 593 ms | 97 ms |
+
+**CPU is ~3.8× faster end-to-end** (and ~3.9× / ~6.8× per model). On a
+**discrete** GPU the GPU path may win, so it stays available via
+`backend="gpu"` (Python) / `BackendPref::Gpu` (Rust).
 
 ## Benchmark
 
@@ -16,8 +32,8 @@ N×N frames).
 | GPU (burn-wgpu) | 1.0 s | 25 | 15.4–17.2 s | ~0.62–0.69 |
 | CPU (burn-flex) | 0.2 s | 5 | 36.8–37.8 s | ~7.4–7.6 |
 
-**GPU is ~12× faster than CPU.** (Numbers predate the Plan 7 reorder; the
-per-frame cost is dominated by the same CPU warps, see below.)
+> These early numbers were **debug**-build and predate the Plan 7 reorder; the
+> release-build comparison above supersedes them (CPU now wins).
 
 ## Batching
 

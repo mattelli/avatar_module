@@ -4,7 +4,7 @@ Text → MP4 avatar video, entirely in Rust (with a Python ≥ 3.10 wrapper).
 
 Give it a sentence and a front-facing photo, and it produces an MP4 of a
 photorealistic talking avatar. The **talking-head** backend is the only
-backend (Plan 6): Wav2Lip + ExpNet + Audio2Pose (Burn, GPU with CPU fallback)
+backend (Plan 6): Wav2Lip + ExpNet + Audio2Pose (Burn, CPU by default)
 produce a clip at **64×64, 128×128, 256×256, or 512×512** px (default
 **256×256**) — precise lips from Wav2Lip, audio-driven expression from ExpNet,
 and audio-driven head motion (yaw/pitch/roll + translation) from Audio2Pose.
@@ -51,7 +51,7 @@ picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ fa
 ## Building
 
 ```bash
-cargo test                 # 96 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
+cargo test                 # 97 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
 ```
 
 The Python wheel (one wheel for all Python ≥ 3.10 thanks to abi3):
@@ -82,8 +82,10 @@ maturin build --release -o dist -m crates/avatar-py/Cargo.toml
 ```
 
 > The backend requires the model weights (`wav2lip_gan.bpk`, `expnet.bpk`,
-> `pose.bpk`, and `pfld.bpk` under `.res/models/{wav2lip,expnet,pose,pfld}/`)
-> and a GPU adapter for reasonable speed — see `PERF_NOTES.md`.
+> `pose.bpk`, and `pfld.bpk` under `.res/models/{wav2lip,expnet,pose,pfld}/`).
+> It runs on the **CPU** by default — these models are small and the GPU path
+> is slower on integrated GPUs (see `PERF_NOTES.md`). Force the GPU with
+> `backend="gpu"` when a discrete GPU is present.
 
 ## Python environment setup
 

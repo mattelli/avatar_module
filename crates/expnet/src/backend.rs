@@ -1,11 +1,18 @@
-//! GPU-first with CPU fallback backend selection (Plan 5, task 5).
+//! Backend selection for the talking-head models (Plan 5, task 5).
 //!
-//! The Wav2Lip + ExpNet models run on Burn, which can target either the GPU
-//! (`burn-wgpu`, DX12/Vulkan on Windows) or CPU (`burn-flex`). This module
-//! picks the backend automatically:
+//! The Wav2Lip + ExpNet + PFLD + Audio2Pose models run on Burn, which can
+//! target either the GPU (`burn-wgpu`, DX12/Vulkan on Windows) or CPU
+//! (`burn-flex`). This module picks the backend:
 //!
 //! - an explicit [`BackendPreference`] can force GPU or CPU,
-//! - otherwise GPU is used when an adapter is available, CPU otherwise.
+//! - otherwise (`Auto`) the **CPU** is used.
+//!
+//! `Auto` defaults to CPU because these models are small and burn-wgpu's
+//! per-op kernel-launch + host↔device sync overhead dominates: on an
+//! integrated GPU the GPU path measured ~4× *slower* than CPU for a full
+//! render (52.6 s vs 13.1 s for 75 frames), and per model ~3.9× slower for
+//! Wav2Lip and ~6.8× slower for PFLD. On a discrete GPU the GPU path may win,
+//! so it remains available via [`BackendPreference::Gpu`].
 //!
 //! Detection is done via [`Device::enumerate`], which is non-panicking and
 //! returns an empty list when no adapter exists for the compiled backends.
@@ -16,7 +23,9 @@ use burn::prelude::*;
 /// User preference for the execution backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackendPreference {
-    /// Use the GPU when available, else CPU (default).
+    /// Use the CPU (default). These models are small and the GPU path is
+    /// slower on integrated GPUs (see the module docs); force the GPU with
+    /// [`BackendPreference::Gpu`] when a discrete GPU is present.
     #[default]
     Auto,
     /// Force the GPU (burn-wgpu); errors if no adapter is available.
@@ -52,7 +61,8 @@ impl Backend {
     /// - [`BackendPreference::Gpu`]: returns an error when no GPU adapter is
     ///   available (rather than silently falling back).
     /// - [`BackendPreference::Cpu`]: always the flex CPU device.
-    /// - [`BackendPreference::Auto`]: GPU when available, CPU otherwise.
+    /// - [`BackendPreference::Auto`]: the CPU (see the module docs — the GPU
+    ///   path is slower for these small models on integrated GPUs).
     ///
     /// When only one backend is compiled in, the other is unavailable and the
     /// preference degrades gracefully.
@@ -64,13 +74,10 @@ impl Backend {
                     .with_context(|| "GPU backend requested but no wgpu adapter is available")?;
                 Ok(Self { device, gpu: true })
             }
-            BackendPreference::Auto => {
-                if let Some(device) = Self::first_gpu() {
-                    Ok(Self { device, gpu: true })
-                } else {
-                    Ok(Self::cpu())
-                }
-            }
+            // Auto: CPU. The models are small; burn-wgpu's per-op overhead
+            // dominates on integrated GPUs (measured ~4× slower end-to-end).
+            // Use `Gpu` explicitly when a discrete GPU is present.
+            BackendPreference::Auto => Ok(Self::cpu()),
         }
     }
 
@@ -138,6 +145,15 @@ mod tests {
     fn force_cpu() {
         let b = Backend::select(BackendPreference::Cpu).unwrap();
         assert!(!b.is_gpu());
+        assert_eq!(b.name(), "burn-flex (CPU)");
+    }
+
+    /// Auto selects the CPU (these models are small; the GPU path is slower on
+    /// integrated GPUs — see the module docs).
+    #[test]
+    fn auto_selects_cpu() {
+        let b = Backend::select(BackendPreference::Auto).unwrap();
+        assert!(!b.is_gpu(), "Auto should select the CPU");
         assert_eq!(b.name(), "burn-flex (CPU)");
     }
 
