@@ -32,13 +32,14 @@ import argparse
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import live_avatar
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / ".res" / "en_US-hfc_female-medium.onnx"
-PICTURE = ROOT / ".res" / "avatar.jpg"
+PICTURE = ROOT / ".res" / "test_a.png"
 
 
 def _import(mod: str):
@@ -166,16 +167,18 @@ def main() -> None:
         voice_model=str(MODEL),
         picture=str(PICTURE),
         size=args.size,
-        speech_speed=0.85,
+        speech_speed=0.7,     # speech speed (0.5 = slow, 1.0 = normal, 2.0 = fast)
         strength=0.25,        # pose wrapper strength
         face_crop=True,        # center-crop to the detected face
         face_crop_margin=0.35,  # margin around the face box
         backend="gpu" if args.wgpu else "auto",  # default CPU; --wgpu forces burn-wgpu
         pose_seed=args.pose_seed,  # None = stochastic head motion; int = reproducible
     )
-    text = "Sitting on a dock in Ohio, a big brown bear bit a boat."  # markers are stripped; audio-driven expression
+    text = "Hello, how can I help you today? Let me know if you have any questions."  # markers are stripped; audio-driven expression
+    t0 = time.perf_counter()
     frames = engine.render(text, str(out))
-    print(f"wrote {frames} frames to {out}")
+    elapsed = time.perf_counter() - t0
+    print(f"wrote {frames} frames to {out} in {elapsed:.2f}s ({elapsed / max(frames, 1):.3f}s/frame)")
 
     cv2 = _import("cv2")
     if cv2 is None:
