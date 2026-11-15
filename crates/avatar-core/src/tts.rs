@@ -94,6 +94,9 @@ pub fn estimate_timings(phonemes: &[String], duration: f32) -> Vec<PhonemeTiming
 pub struct EmbeddedPiper {
     inner: piper_rs::Piper,
     espeak_voice: String,
+    /// Piper `length_scale` override (speed control). `None` = the model's
+    /// configured value (usually 1.0). Larger = slower speech.
+    length_scale: Option<f32>,
 }
 
 #[cfg(feature = "embedded")]
@@ -108,7 +111,19 @@ impl EmbeddedPiper {
             .unwrap_or("en-us")
             .to_string();
         let inner = piper_rs::Piper::new(model_path, &config_path)?;
-        Ok(Self { inner, espeak_voice })
+        Ok(Self {
+            inner,
+            espeak_voice,
+            length_scale: None,
+        })
+    }
+
+    /// Sets the Piper `length_scale` (speed control): `1.0` = the model's
+    /// native rate, `> 1.0` = slower, `< 1.0` = faster. `None` restores the
+    /// model default.
+    pub fn with_length_scale(mut self, length_scale: Option<f32>) -> Self {
+        self.length_scale = length_scale;
+        self
     }
 
     /// Phonemizes `text` with espeak-ng using the model's voice.
@@ -126,7 +141,9 @@ impl EmbeddedPiper {
 impl Synthesizer for EmbeddedPiper {
     fn synthesize(&mut self, text: &str) -> anyhow::Result<SynthResult> {
         let phonemes = self.phonemize(text)?;
-        let (samples, sample_rate) = self.inner.create(text, false, None, None, None, None)?;
+        let (samples, sample_rate) =
+            self.inner
+                .create(text, false, None, self.length_scale, None, None)?;
         let duration = samples.len() as f32 / sample_rate as f32;
         let timings = estimate_timings(&phonemes, duration);
         Ok(SynthResult {
@@ -144,6 +161,9 @@ pub struct SubprocessPiper {
     pub piper_bin: PathBuf,
     /// Voice model path (`model.onnx`).
     pub model_path: PathBuf,
+    /// Piper `length_scale` override (speed control). `None` = the model's
+    /// configured value. Larger = slower speech.
+    pub length_scale: Option<f32>,
 }
 
 #[cfg(feature = "subprocess")]
@@ -152,7 +172,15 @@ impl SubprocessPiper {
         Self {
             piper_bin: piper_bin.into(),
             model_path: model_path.into(),
+            length_scale: None,
         }
+    }
+
+    /// Sets the Piper `length_scale` (speed control): `1.0` = the model's
+    /// native rate, `> 1.0` = slower, `< 1.0` = faster.
+    pub fn with_length_scale(mut self, length_scale: Option<f32>) -> Self {
+        self.length_scale = length_scale;
+        self
     }
 
     /// Phonemizes `text` by calling the `espeak-ng` CLI (best effort).
@@ -173,15 +201,20 @@ impl Synthesizer for SubprocessPiper {
     fn synthesize(&mut self, text: &str) -> anyhow::Result<SynthResult> {
         let config_path = config_path_for(&self.model_path);
         let tmp = std::env::temp_dir().join(format!("avatar_piper_{}.wav", std::process::id()));
+        let mut args: Vec<String> = vec![
+            "-m".into(),
+            self.model_path.to_str().unwrap_or_default().into(),
+            "-c".into(),
+            config_path.to_str().unwrap_or_default().into(),
+            "-f".into(),
+            tmp.to_str().unwrap_or_default().into(),
+        ];
+        if let Some(ls) = self.length_scale {
+            args.push("--length_scale".into());
+            args.push(ls.to_string());
+        }
         let out = std::process::Command::new(&self.piper_bin)
-            .args([
-                "-m",
-                self.model_path.to_str().unwrap_or_default(),
-                "-c",
-                config_path.to_str().unwrap_or_default(),
-                "-f",
-                tmp.to_str().unwrap_or_default(),
-            ])
+            .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -293,6 +326,26 @@ mod tests {
         let b = tts.synthesize("Goodbye").unwrap();
         assert!(!a.samples.is_empty() && !b.samples.is_empty());
         assert!(a.duration() > 0.0 && b.duration() > 0.0);
+    }
+
+    /// `length_scale` controls speed: a larger value yields a longer clip
+    /// (slower speech) for the same text.
+    #[test]
+    fn length_scale_controls_speed() {
+        let Some(model) = test_model() else { return };
+        let text = "Hello world, this is a speed test.";
+
+        let mut fast = EmbeddedPiper::new(&model).unwrap().with_length_scale(Some(0.5));
+        let mut slow = EmbeddedPiper::new(&model).unwrap().with_length_scale(Some(2.0));
+
+        let d_fast = fast.synthesize(text).unwrap().duration();
+        let d_slow = slow.synthesize(text).unwrap().duration();
+
+        assert!(
+            d_slow > d_fast * 1.5,
+            "length_scale 2.0 should be much slower than 0.5 \
+             (fast {d_fast:.2}s vs slow {d_slow:.2}s)"
+        );
     }
 
     /// Timing estimation: monotonic, covers duration, empty input → empty.

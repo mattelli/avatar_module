@@ -30,6 +30,7 @@ struct Engine {
     face_crop_margin: f32,
     backend: Option<avatar_core::pipeline::BackendPref>,
     pose_seed: Option<u64>,
+    speech_speed: f32,
 }
 
 #[pymethods]
@@ -50,8 +51,10 @@ impl Engine {
     ///   when available, CPU otherwise), "gpu", or "cpu".
     /// - `pose_seed`: optional Audio2Pose latent seed for reproducible head
     ///   motion (default None = stochastic head motion per render).
+    /// - `speech_speed`: speech speed multiplier (default 1.0 = the voice
+    ///   model's native rate; < 1.0 = slower, > 1.0 = faster).
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto", pose_seed=None))]
+    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto", pose_seed=None, speech_speed=1.0))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
@@ -61,10 +64,16 @@ impl Engine {
         face_crop_margin: f32,
         backend: &str,
         pose_seed: Option<u64>,
+        speech_speed: f32,
     ) -> PyResult<Self> {
         if size != 64 && size != 128 && size != 256 && size != 512 {
             return Err(PyValueError::new_err(format!(
                 "size must be 64, 128, 256, or 512, got {size}"
+            )));
+        }
+        if !(speech_speed > 0.0 && speech_speed.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "speech_speed must be a positive finite number, got {speech_speed}"
             )));
         }
         let model_path = std::path::PathBuf::from(voice_model);
@@ -90,6 +99,7 @@ impl Engine {
             face_crop_margin,
             backend,
             pose_seed,
+            speech_speed,
         })
     }
 
@@ -109,6 +119,7 @@ impl Engine {
             face_crop_margin: self.face_crop_margin,
             backend: self.backend,
             pose_seed: self.pose_seed,
+            speech_speed: self.speech_speed,
         };
         let out_path = std::path::PathBuf::from(out);
         // GIL released: the pipeline is pure native compute.

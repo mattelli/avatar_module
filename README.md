@@ -51,7 +51,7 @@ picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ fa
 ## Building
 
 ```bash
-cargo test                 # 95 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
+cargo test                 # 96 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
 ```
 
 The Python wheel (one wheel for all Python ≥ 3.10 thanks to abi3):
@@ -152,7 +152,8 @@ let cfg = EngineConfig::voice(".res/en_US-hfc_female-medium.onnx")
     .with_picture("portrait.png")
     .with_size(256)               // 64 | 128 | 256 | 512
     .with_strength(0.5)           // photo ~0.5, cartoon ~1.0
-    .with_pose_seed(Some(42));    // None = stochastic head motion
+    .with_pose_seed(Some(42))     // None = stochastic head motion
+    .with_speech_speed(0.8);      // < 1.0 = slower, > 1.0 = faster
 let (frames, elapsed) = render_with_stats("Hello world", "out.mp4", &cfg)?;
 ```
 
@@ -171,6 +172,7 @@ engine = live_avatar.Engine(
     face_crop_margin=0.35,        # margin around the face box
     backend="auto",               # "auto" | "gpu" | "cpu"
     pose_seed=None,               # None = stochastic head motion; int = reproducible
+    speech_speed=1.0,             # < 1.0 = slower, > 1.0 = faster
 )
 frames = engine.render("Hello world", "out.mp4")  # GIL released
 ```

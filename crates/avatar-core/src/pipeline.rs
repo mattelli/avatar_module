@@ -36,6 +36,9 @@ pub struct EngineConfig {
     /// motion (a fresh latent `z ~ N(0,1)` per render); `Some(seed)` =
     /// reproducible head motion.
     pub pose_seed: Option<u64>,
+    /// Speech speed multiplier (default `1.0`). `< 1.0` = slower, `> 1.0` =
+    /// faster. Mapped to Piper's `length_scale` as `1 / speech_speed`.
+    pub speech_speed: f32,
 }
 
 /// Backend selection for the talking-head path.
@@ -79,6 +82,7 @@ impl EngineConfig {
             face_crop_margin: crate::face_crop::DEFAULT_FACE_CROP_MARGIN,
             backend: None,
             pose_seed: None,
+            speech_speed: 1.0,
         }
     }
 
@@ -123,6 +127,13 @@ impl EngineConfig {
     /// motion; `Some(seed)` = reproducible head motion.
     pub fn with_pose_seed(mut self, seed: Option<u64>) -> Self {
         self.pose_seed = seed;
+        self
+    }
+
+    /// Sets the speech speed multiplier: `< 1.0` = slower, `> 1.0` = faster,
+    /// `1.0` = the voice model's native rate (default). Must be positive.
+    pub fn with_speech_speed(mut self, speed: f32) -> Self {
+        self.speech_speed = speed;
         self
     }
 }
@@ -198,9 +209,21 @@ pub fn render_with_stats(
     let spans = markers::parse(text);
     anyhow::ensure!(!spans.is_empty(), "no text to render");
 
-    // 2. TTS (per span).
+    // 2. TTS (per span). `speech_speed` maps to Piper's `length_scale`
+    //    (inverse of speed): 1.0 = native, <1.0 = slower, >1.0 = faster.
+    anyhow::ensure!(
+        cfg.speech_speed > 0.0 && cfg.speech_speed.is_finite(),
+        "speech_speed must be a positive finite number, got {}",
+        cfg.speech_speed
+    );
+    let length_scale = if (cfg.speech_speed - 1.0).abs() < f32::EPSILON {
+        None // model default
+    } else {
+        Some(1.0 / cfg.speech_speed)
+    };
     let mut tts = EmbeddedPiper::new(&cfg.model_path)
-        .with_context(|| format!("load voice {}", cfg.model_path.display()))?;
+        .with_context(|| format!("load voice {}", cfg.model_path.display()))?
+        .with_length_scale(length_scale);
     let synth = synthesize_spans(&mut tts, &spans)?;
     let (samples, sr) = concat_samples(&synth);
     anyhow::ensure!(!samples.is_empty(), "no audio synthesized");
