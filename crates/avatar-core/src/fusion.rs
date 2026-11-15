@@ -365,14 +365,14 @@ pub fn blend_mouth(
     blend_region(frame, &patch_img, &RegionBlend::mouth(cfg))
 }
 
-/// Converts a flat `[3, 96, 96]` (channel-major, CHW) mouth patch with values
-/// in 0..1 into an RGBA image.
+/// Converts a flat `[3, 96, 96]` (channel-major, CHW) Wav2Lip face patch with
+/// values in 0..1 into an RGBA image.
 ///
 /// The Wav2Lip model returns channel-first tensors (`[b, 3, 96, 96]`), so the
 /// buffer is laid out as three consecutive 96×96 planes (R, G, B) — **not**
 /// interleaved RGB. Indexing it as HWC interleaves the planes and produces a
 /// tiled/garbled face.
-fn patch_to_image(patch: &[f32]) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+pub fn patch_to_image(patch: &[f32]) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     const PLANE: usize = 96 * 96;
     let mut img = ImageBuffer::from_pixel(96, 96, Rgba([0u8, 0, 0, 255]));
     for y in 0..96usize {

@@ -28,6 +28,8 @@ wav2lip = { path = "../wav2lip" }
 expnet = { path = "../expnet" }
 # Plan 6 — Audio2Pose head motion (required; the pose warp is always wired).
 pose = { path = "../pose" }
+# Plan 7 — PFLD 98-landmark detector (drives the expression-warp control points).
+pfld = { path = "../pfld" }
 
 [features]
 default = ["embedded"]

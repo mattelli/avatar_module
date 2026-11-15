@@ -1,15 +1,21 @@
-//! Wav2Lip + ExpNet talking-head render path (Plan 5, task 8; pose Plan 6).
+//! Wav2Lip + ExpNet talking-head render path (Plan 5, task 8; pose Plan 6;
+//! reordered pipeline Plan 7, task 5).
 //!
-//! Replaces the atlas/warp renderer with a photorealistic talking head:
+//! Replaces the atlas/warp renderer with a photorealistic talking head. The
+//! order is the Plan 7 reorder (see `steps-analysis.md`):
 //!
 //! 1. Piper TTS audio is resampled to 16 kHz (the models' input rate).
 //! 2. [`expnet::ExpNet`] maps the audio to per-frame expression coefficients.
-//! 3. [`wav2lip::Wav2Lip`] maps audio windows + the (face-cropped) source to
-//!    precise 96×96 mouth patches, and exposes the 512-d audio embeddings.
-//! 4. [`pose::Audio2Pose`] maps those embeddings to per-frame head-pose motion
-//!    (yaw/pitch/roll + tx/ty/tz), seeded optionally (Plan 6).
-//! 5. [`crate::fusion`] combines them per frame: expression-warp the source,
-//!    apply the head-pose warp, then alpha-blend the mouth patch in.
+//! 3. The source picture is made square at its **native** resolution (N×N, no
+//!    face crop — the full frame is kept for the later in-paint).
+//! 4. The detected face bbox is cropped with the Wav2Lip pads (M×M → 96×96)
+//!    and [`wav2lip::Wav2Lip`] re-renders the **whole** face (clean input).
+//! 5. The 96×96 face is resized to 112×112 and the **expression warp** runs on
+//!    it, driven by **PFLD-detected** control points (Plan 7, tasks 2–3).
+//! 6. The 112×112 face is resized back to M×M and **in-painted** into the N×N
+//!    square at the bbox rect (2 px feather) — no sub-region mask, no seam.
+//! 7. [`pose::Audio2Pose`] head motion is applied to the whole N×N frame.
+//! 8. The frame is resized to the requested output size.
 //!
 //! Returns RGBA frames at `FusionConfig::size`, which the caller encodes to
 //! MP4 with the existing encoder/muxer (audio keeps the original TTS rate).
@@ -21,7 +27,8 @@ use expnet::backend::{Backend, BackendPreference};
 use image::{ImageBuffer, Rgba};
 
 use crate::analysis::FPS;
-use crate::fusion::{FusionConfig, fuse_frame};
+use crate::fusion::{FusionConfig, patch_to_image, pose_warp, warp_from_landmarks};
+use crate::inpaint::{DEFAULT_FEATHER_PX, FaceRect, crop_face_padded, paste_face};
 
 /// Sample rate the Wav2Lip / ExpNet models expect.
 pub const MODEL_SAMPLE_RATE: u32 = 16_000;
@@ -37,6 +44,11 @@ pub const WAV2LIP_WEIGHTS: &str = "wav2lip_gan.bpk";
 pub const EXPNET_WEIGHTS: &str = "expnet.bpk";
 /// Path to the Audio2Pose `.bpk` weights (Plan 6).
 pub const POSE_WEIGHTS: &str = "pose.bpk";
+/// Path to the PFLD `.bpk` weights (Plan 7).
+pub const PFLD_WEIGHTS: &str = "pfld.bpk";
+
+/// Resolution the expression warp (step 5) runs at — PFLD's native input.
+const EXPR_SIZE: u32 = 112;
 
 /// Resolves the `.res/models` directory (same walk-up as `face_crop`).
 fn models_dir() -> Option<PathBuf> {
@@ -106,6 +118,7 @@ pub fn render_talking_head(
     let expnet_weights = dir.join("expnet").join(EXPNET_WEIGHTS);
     let wav2lip_weights = dir.join("wav2lip").join(WAV2LIP_WEIGHTS);
     let pose_weights = dir.join("pose").join(POSE_WEIGHTS);
+    let pfld_weights = dir.join("pfld").join(PFLD_WEIGHTS);
     anyhow::ensure!(
         expnet_weights.exists(),
         "expnet weights not found: {}",
@@ -121,6 +134,11 @@ pub fn render_talking_head(
         "pose weights not found: {}",
         pose_weights.display()
     );
+    anyhow::ensure!(
+        pfld_weights.exists(),
+        "pfld weights not found: {}",
+        pfld_weights.display()
+    );
 
     let backend = Backend::select(backend_pref).context("backend selection failed")?;
     let expnet = expnet::ExpNet::with_backend(&expnet_weights, &backend)
@@ -130,6 +148,8 @@ pub fn render_talking_head(
     let audio2pose = pose::Audio2Pose::with_backend(&pose_weights, &backend)
         .context("load pose model")?
         .with_seed(pose_seed);
+    let pfld = pfld::PFLD::with_backend(&pfld_weights, &backend)
+        .context("load pfld model")?;
 
     // 4. Expression coefficients (ExpNet) — one 64-d vector per video frame.
     let coeffs = expnet.predict(&mel, video_frames).context("expnet predict")?;
@@ -149,25 +169,61 @@ pub fn render_talking_head(
         .decode(&audio_emb)
         .context("audio2pose decode")?;
 
-    // 6. Source face: detect + crop (or synthetic face).
-    let src = load_source_face(picture, cfg.size)?;
+    // 6. Source square (step 0): native N×N, no face crop (full frame kept).
+    let square = load_source_square(picture)?;
+    let (n, _) = square.dimensions();
 
-    // The Wav2Lip input face is the same source crop every frame (static
-    // image), resized to 96x96.
-    let face = wav2lip::face_input(&src);
+    // 7. Step 1: detect the face on the square and crop it with the Wav2Lip
+    //    pads (M×M). Falls back to the whole square when no face is found.
+    let (face_crop, rect) = match face_bbox(&square) {
+        Some(bbox) => crop_face_padded(&square, &bbox),
+        None => {
+            let rect = FaceRect { x: 0, y: 0, w: n, h: n };
+            (square.clone(), rect)
+        }
+    };
+
+    // 8. Step 2: Wav2Lip on the clean cropped face (same face every frame,
+    //    reused across chunks). `face_input` resizes the crop to 96×96.
+    let face = wav2lip::face_input(&face_crop);
     let faces = vec![face; chunk_frames];
-    let mouth_patches = wav2lip
+    let patches = wav2lip
         .predict(&chunks, &faces)
         .context("wav2lip predict")?;
 
-    // 7. Fuse: one frame per video_frames. The mouth patches cover the mel
-    //    chunks (chunk_frames >= video_frames); index clamped. The pose
-    //    sequence is `video_frames × 6`; index clamped to its length.
-    let mut frames = Vec::with_capacity(video_frames);
+    // 9. Step 3: expression warp on the clean Wav2Lip face, driven by PFLD
+    //    landmarks. The face is resized to 112×112 (PFLD's input), the 98
+    //    landmarks are detected and mapped to 9 control points, and the
+    //    per-frame ExpNet coefficients drive the displacement.
+    let face96 = patch_to_image(&patches[0]);
+    let face112 = image::imageops::resize(
+        &face96,
+        EXPR_SIZE,
+        EXPR_SIZE,
+        image::imageops::FilterType::Triangle,
+    );
+    let landmarks9 = detect_control_points(&pfld, &face112)?;
+    let mut expr_faces = Vec::with_capacity(video_frames);
     for i in 0..video_frames {
         let coeff_row = &coeffs[i * 64..(i + 1) * 64];
-        let chunk_idx = i.min(chunk_frames.saturating_sub(1));
-        let mouth = &mouth_patches[chunk_idx];
+        let warped = warp_from_landmarks(&face112, coeff_row, &landmarks9, cfg.strength);
+        expr_faces.push(warped);
+    }
+
+    // 10. Steps 4–6: per frame, in-paint the warped face back into the square,
+    //     apply the head-pose warp to the whole frame, then resize.
+    let mut frames = Vec::with_capacity(video_frames);
+    for (i, expr_face) in expr_faces.iter().enumerate() {
+        // Step 4: resize 112×112 → M×M and paste into the N×N square.
+        let face_m = image::imageops::resize(
+            expr_face,
+            rect.w,
+            rect.h,
+            image::imageops::FilterType::Triangle,
+        );
+        let square2 = paste_face(&square, &face_m, rect, DEFAULT_FEATHER_PX);
+
+        // Step 5: head-pose warp on the whole frame (background moves too).
         let pose_row = {
             let n = pose_seq.len() / 6;
             if n == 0 {
@@ -177,36 +233,69 @@ pub fn render_talking_head(
                 Some(&pose_seq[idx * 6..(idx + 1) * 6])
             }
         };
-        let frame = fuse_frame(&src, coeff_row, pose_row, mouth, cfg);
+        let posed = match pose_row {
+            Some(p) => pose_warp(&square2, p, cfg.strength),
+            None => square2,
+        };
+
+        // Step 6: resize to the requested output size.
+        let frame = if posed.dimensions() == (cfg.size, cfg.size) {
+            posed
+        } else {
+            image::imageops::resize(
+                &posed,
+                cfg.size,
+                cfg.size,
+                image::imageops::FilterType::Triangle,
+            )
+        };
         frames.push(frame);
     }
 
     Ok(frames)
 }
 
-/// Loads the source face for fusion: face-crop the picture (if any) or use a
-/// synthetic face, ensuring it is square and at least `size` on each side.
-fn load_source_face(
-    picture: Option<&Path>,
-    size: u32,
-) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+/// Step 0: loads the source picture and makes it square at its **native**
+/// resolution (no face crop, no resize). Falls back to a synthetic face when
+/// no picture is given.
+fn load_source_square(picture: Option<&Path>) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     match picture {
         Some(p) => {
             let img = crate::atlas::load_image(p)
                 .with_context(|| format!("load avatar {}", p.display()))?;
-            // Face-crop, center-crop to square, then resize to `size`.
-            let img =
-                crate::face_crop::apply_face_crop(img, true, crate::face_crop::DEFAULT_FACE_CROP_MARGIN);
-            let img = crate::atlas::center_crop_square(&img);
-            Ok(image::imageops::resize(
-                &img,
-                size,
-                size,
-                image::imageops::FilterType::Triangle,
-            ))
+            Ok(crate::atlas::center_crop_square(&img))
         }
-        None => Ok(crate::atlas::test_face_cpu(size, size)),
+        None => Ok(crate::atlas::test_face_cpu(256, 256)),
     }
+}
+
+/// Step 1 helper: detects the highest-scoring face on the square, using the
+/// bundled SeetaFace model. Returns `None` when the model is missing or no
+/// face is found (the caller falls back to the whole square).
+fn face_bbox(square: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> Option<rustface::Rectangle> {
+    let model = crate::face_crop::face_model_path()?;
+    crate::face_crop::detect_face_box(square, &model)
+}
+
+/// Step 3 helper: runs PFLD on the 112×112 face and maps the 98 landmarks to
+/// the 9 expression-warp control points.
+fn detect_control_points(
+    pfld: &pfld::PFLD,
+    face112: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+) -> Result<[[f32; 2]; pfld::NUM_CONTROL_POINTS]> {
+    // RGBA → flat RGB (HWC, 0..1) for PFLD.
+    let (w, h) = face112.dimensions();
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let p = face112.get_pixel(x, y);
+            rgb.push(p[0] as f32 / 255.0);
+            rgb.push(p[1] as f32 / 255.0);
+            rgb.push(p[2] as f32 / 255.0);
+        }
+    }
+    let landmarks = pfld.predict(&rgb).context("pfld predict")?;
+    pfld::landmarks_to_control_points(&landmarks).context("map landmarks to control points")
 }
 
 #[cfg(test)]
@@ -251,6 +340,7 @@ mod tests {
         dir.join("expnet").join(EXPNET_WEIGHTS).exists()
             && dir.join("wav2lip").join(WAV2LIP_WEIGHTS).exists()
             && dir.join("pose").join(POSE_WEIGHTS).exists()
+            && dir.join("pfld").join(PFLD_WEIGHTS).exists()
     }
 
     /// T8: the full talking-head path produces frames at the configured size

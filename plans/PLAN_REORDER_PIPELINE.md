@@ -1,6 +1,6 @@
-# Plan 7 — Reordered talking-head pipeline (Wav2Lip → in-paint → PFLD expression → pose)
+# Plan 7 — Reordered talking-head pipeline (Wav2Lip → PFLD expression → in-paint → pose)
 
-**Status: proposed (not implemented).**
+**Status: implemented (tasks 1–5 done; task 6 — tests/docs/cleanup — pending).**
 
 **References:** `steps-analysis.md` (the step-by-step analysis this plan
 implements), `plans/PLAN_TALKING_HEAD_ONLY.md` (Plan 6 — talking-head only,
@@ -23,9 +23,16 @@ sizes, Audio2Pose), `plans/PLAN_WAV2LIP_EXPNET.md` (Plan 5 — Wav2Lip + ExpNet)
 
   ```
   src ─▶ [0] square N×N ─▶ [1] bbox crop M×M → 96×96 ─▶ [2] Wav2Lip(clean)
-      ─▶ [3] 96×96 → M×M, in-paint into N×N ─▶ [4] N×N → 112×112, expression warp (PFLD)
-      ─▶ [5] pose warp ─▶ [6] resize → frame
+      ─▶ [3] 96×96 → 112×112, expression warp (PFLD)
+      ─▶ [4] 112×112 → M×M, in-paint into N×N ─▶ [5] pose warp ─▶ [6] resize → frame
   ```
+
+  > **Design fix (user-confirmed).** The expression warp (step 3) runs on the
+  > **step-1 cropped face**, *before* the in-paint (step 4) — not on the full
+  > N×N square. PFLD needs a centered, frame-filling face; on the full square
+  > the landmarks scatter (measured on `avatar.jpg`: only 64 % of landmarks land
+  > inside the detector bbox, chin 161 px too low). On the crop, 96 % land on the
+  > face (chin within 3 px). The warped face is then pasted back (step 4).
 
 ---
 
@@ -134,11 +141,11 @@ into the warped frame → seam; (b) control points are canonical, not detected.
 
 ### Task 5 — Reorder the pipeline (steps 0–6)
 - Rewrite `render_talking_head` to the new order:
-  `square N×N → bbox crop → Wav2Lip → in-paint → resize 112 → expression warp
-  (PFLD) → pose warp → resize`.
+  `square N×N → bbox crop → Wav2Lip → resize 112 → expression warp (PFLD)
+  → resize M×M → in-paint into N×N → pose warp → resize`.
 - Wav2Lip still runs **once per chunk** with the same clean face reused.
 - Keep `pose_seed` threading and the existing `EngineConfig` surface.
-- Commit: `task5: reorder talking-head pipeline (wav2lip -> inpaint -> pfld expr -> pose)`
+- Commit: `task5: reorder talking-head pipeline (wav2lip -> pfld expr -> inpaint -> pose)`
 
 ### Task 6 — Tests, docs, cleanup
 - End-to-end test: render a short clip; assert frame count, size, no seam
