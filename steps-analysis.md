@@ -182,7 +182,7 @@ added without reworking the pipeline.
 |---|---|
 | **Input** | `sq2` (N×N); `pose[6]` = `[yaw,pitch,roll,tx,ty,tz]` (Audio2Pose); `strength` |
 | **What** | apply **audio-driven head motion** — rotation, slight shear, scale, translation — as one 2D affine transform about the frame centre |
-| **How** | clamp each component to `[-1,1]`; parameters (× `strength`): `ang = roll·0.15`; `shear_x = yaw·0.20`; `shear_y = pitch·0.20`; `off_x = tx·0.10·w`, `off_y = ty·0.10·h`; `scale = 1 + tz·0.06`. Per output pixel: coords about centre → **inverse** transform (rotate→scale→shear→translate) → clamp to edges → bilinear sample |
+| **How** | clamp each component to `[-1,1]`; parameters (× `strength`): `ang = roll·6.0`; `shear_x = yaw·3.0`; `shear_y = pitch·2.0`; `off_x = tx·2.5·w`, `off_y = ty·2.5·h`; `scale = 1 + tz·0.5`. Per output pixel: coords about centre → **inverse** transform (rotate→scale→shear→translate) → clamp to edges → bilinear sample |
 | **Output** | `posed` — RGBA **N×N** |
 
 Notes: 2D affine approximation of 3D head pose. Edge clamping → bounded, no NaN.

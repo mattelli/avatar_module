@@ -215,15 +215,24 @@ pub fn pose_warp(
     let tz = pose.get(5).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
 
     // Rotation (roll) about the centre.
-    let ang = roll * 0.15 * strength;
+    //
+    // Gain calibration: Audio2Pose emits *normalized* coefficients whose
+    // per-clip range is small (measured on a 1 s clip: yaw ~0.02, pitch ~0.03,
+    // roll ~0.01, tx/ty ~0.01, tz ~0.12 peak-to-peak). In SadTalker these feed
+    // a 3DMM renderer that supplies the geometric gain; this 2D-affine
+    // approximation has none, so the gains below add it explicitly. They are
+    // chosen so each component produces a visible, natural motion at the
+    // default `strength` (0.5): roll ~2°, yaw/pitch shear ~10 px at the frame
+    // edge, translation ~8 px, scale ~3 %.
+    let ang = roll * 6.0 * strength;
     let (sin_a, cos_a) = ang.sin_cos();
     // Shear from yaw/pitch (small, bounded).
-    let shear_x = yaw * 0.20 * strength;
-    let shear_y = pitch * 0.20 * strength;
+    let shear_x = yaw * 3.0 * strength;
+    let shear_y = pitch * 2.0 * strength;
     // Translation (offset) and scale (tz).
-    let off_x = tx * 0.10 * strength * w as f32;
-    let off_y = ty * 0.10 * strength * h as f32;
-    let scale = 1.0 + tz * 0.06 * strength;
+    let off_x = tx * 2.5 * strength * w as f32;
+    let off_y = ty * 2.5 * strength * h as f32;
+    let scale = 1.0 + tz * 0.5 * strength;
 
     let mut out = ImageBuffer::new(w as u32, h as u32);
     for y in 0..h {
@@ -394,6 +403,34 @@ mod tests {
         assert!(
             pixel_diff(&src, &posed_tx) > 0.0,
             "nonzero tx pose should change the frame"
+        );
+    }
+
+    /// Regression (invisible pose): Audio2Pose emits *small* normalized
+    /// coefficients (per-clip range ~0.01–0.12). With the old gains those
+    /// produced sub-pixel motion (invisible). The calibrated gains must make
+    /// such realistic magnitudes move the frame *visibly*.
+    #[test]
+    fn small_realistic_pose_moves_frame_visibly() {
+        let src = test_face_cpu(256, 256);
+        // Realistic per-frame magnitudes measured from Audio2Pose.
+        let pose = [0.02f32, 0.03, 0.012, 0.009, 0.008, 0.12];
+        let posed = pose_warp(&src, &pose, 0.5);
+
+        // Mean absolute difference per channel over the whole frame.
+        let mut sum = 0.0f64;
+        let mut n = 0.0f64;
+        for (p, q) in src.pixels().zip(posed.pixels()) {
+            for c in 0..3 {
+                sum += (p[c] as f64 - q[c] as f64).abs();
+                n += 1.0;
+            }
+        }
+        let mean = sum / n;
+        assert!(
+            mean > 1.0,
+            "realistic pose should visibly move the frame (mean diff {mean:.3}/255); \
+             the pose-warp gains are probably too small"
         );
     }
 
