@@ -1,5 +1,7 @@
 # steps-analysis.md — Talking-head pipeline: step-by-step analysis
 
+**Status: implemented (Plan 7, tasks 1–6).**
+
 This document analyses the **agreed pipeline**:
 
 ```

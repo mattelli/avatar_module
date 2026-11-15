@@ -32,24 +32,26 @@ engine.render("Hello world. Great news.", "clip.mp4")
 text ──▶ Piper TTS ──▶ audio (16 kHz) ──▶ ExpNet ──▶ expression coefficients ──┐
                                           │                                     │
                                           └▶ Wav2Lip audio encoder ──▶ 512-d ──▶ Audio2Pose ──▶ pose (6/frame) ─┤
-picture ──────────────────────────────▶ Wav2Lip ──▶ mouth patches ──────────────┴─▶ fusion (expression warp + pose warp + mouth blend) ──▶ N×N frames ──▶ MP4
+picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ face ──▶ PFLD expr warp ──┴─▶ in-paint ──▶ pose warp ──▶ N×N frames ──▶ MP4
 ```
 
 | Stage | Crate / module | What it does |
 |-------|----------------|--------------|
 | TTS | `avatar-core::tts` | Embedded Piper (`piper-rs`): PCM + phoneme timings |
 | ExpNet | `crates/expnet` | Audio → 3DMM-style expression coefficients (Burn, task 3) |
-| Wav2Lip | `crates/wav2lip` | Audio + face → precise 96×96 mouth patch; also exposes the 512-d audio encoder embedding (Burn, task 4) |
+| Wav2Lip | `crates/wav2lip` | Audio + face → precise 96×96 face; also exposes the 512-d audio encoder embedding (Burn, task 4) |
+| PFLD | `crates/pfld` | 112×112 face → 98 landmarks → 9 expression-warp control points (Burn, Plan 7) |
 | Audio2Pose | `crates/pose` | Audio embeddings → head-pose motion (yaw/pitch/roll + tx/ty/tz), optional-seeded latent (Burn, Plan 6) |
-| Fusion | `avatar-core::fusion` | Per-frame expression warp + 2D affine pose warp + mouth-patch blend (tasks 6) |
-| Talking head | `avatar-core::talking_head` | Orchestrates ExpNet + Wav2Lip + Audio2Pose + fusion → N×N frames (task 8) |
+| Fusion | `avatar-core::fusion` | Per-frame landmark-driven expression warp + 2D affine pose warp (Plan 7) |
+| In-paint | `avatar-core::inpaint` | Tight bbox crop + 2 px-feathered paste of the Wav2Lip face back into the N×N square (Plan 7) |
+| Talking head | `avatar-core::talking_head` | Orchestrates the reordered pipeline → N×N frames (Plan 7) |
 | Encode | `avatar-core::encoder` | H.264 (`openh264`) + AAC (`fdk-aac` feature; silent placeholder otherwise) → MP4 (`mp4` crate) |
 | Python | `avatar-py` | PyO3 `abi3` wheel, GIL released during render |
 
 ## Building
 
 ```bash
-cargo test                 # 77 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pose, fusion, talking-head
+cargo test                 # 92 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
 ```
 
 The Python wheel (one wheel for all Python ≥ 3.10 thanks to abi3):
@@ -79,9 +81,9 @@ maturin build --release -o dist -m crates/avatar-py/Cargo.toml
 # or: pip install --force-reinstall dist/live_avatar-*.whl
 ```
 
-> The backend requires the model weights (`wav2lip_gan.bpk`, `expnet.bpk`, and
-> `pose.bpk` under `.res/models/{wav2lip,expnet,pose}/`) and a GPU adapter for
-> reasonable speed — see `PERF_NOTES.md`.
+> The backend requires the model weights (`wav2lip_gan.bpk`, `expnet.bpk`,
+> `pose.bpk`, and `pfld.bpk` under `.res/models/{wav2lip,expnet,pose,pfld}/`)
+> and a GPU adapter for reasonable speed — see `PERF_NOTES.md`.
 
 ## Python environment setup
 
@@ -145,7 +147,7 @@ the pipeline falls back to using the whole picture (rendering never fails).
 use avatar_core::pipeline::{render, render_with_stats, EngineConfig};
 
 // Talking-head backend (the only backend; requires model weights in
-// .res/models/{wav2lip,expnet,pose}/*.bpk):
+// .res/models/{wav2lip,expnet,pose,pfld}/*.bpk):
 let cfg = EngineConfig::voice(".res/en_US-hfc_female-medium.onnx")
     .with_picture("portrait.png")
     .with_size(256)               // 64 | 128 | 256 | 512
@@ -191,16 +193,18 @@ python examples/render_clip.py --no-play    # render only
 python examples/render_clip.py --frame 10   # dump frame 10 as PNG
 ```
 
-> **Input pictures:** the pipeline detects the face (SeetaFace via `rustface`,
-> plan 4) and center-crops the photo with a 35% margin before building the
-> source face, so an off-center or small face is centered in the output.
-> Face-crop can be disabled with `face_crop=False` (or `with_face_crop(false)`
-> in Rust); the margin is configurable via `face_crop_margin`. If the model is
-> missing or no face is found, the whole picture is used — rendering never
-> fails. The cropped region is then center-cropped to a square and resized to
-> the configured output size (64, 128, 256, or 512 px). A picture that is
-> mostly one color (e.g. a very light photo) will produce a correspondingly
-> flat-looking avatar.
+> **Input pictures:** the pipeline makes the picture square at its native
+> resolution, detects the face (SeetaFace via `rustface`, plan 4), and crops
+> it with the Wav2Lip pads for the lip-sync model; the re-rendered face is then
+> pasted back into the square (Plan 7). If the model is missing or no face is
+> found, the whole square is used — rendering never fails. The final frame is
+> resized to the configured output size (64, 128, 256, or 512 px). A picture
+> that is mostly one color (e.g. a very light photo) will produce a
+> correspondingly flat-looking avatar.
+>
+> **Note:** the `face_crop` / `face_crop_margin` options are retained for API
+> compatibility but are **not wired** into the reordered talking-head pipeline
+> (the detected-bbox crop is intrinsic to steps 1–4).
 
 ## Plans
 
@@ -211,6 +215,8 @@ python examples/render_clip.py --frame 10   # dump frame 10 as PNG
   configurable sizes (64/128/256/512), Audio2Pose head motion
 - `plans/PLAN_FIX_RENDER_ISSUES.md` — fixes silent audio, flicker, and input
   picture downscaling
+- `plans/PLAN_REORDER_PIPELINE.md` — reordered pipeline: Wav2Lip on a tight
+  crop → PFLD expression warp → 2 px in-paint → pose warp (Plan 7, implemented)
 
 ## License
 

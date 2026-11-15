@@ -1,6 +1,6 @@
 # Plan 7 — Reordered talking-head pipeline (Wav2Lip → PFLD expression → in-paint → pose)
 
-**Status: implemented (tasks 1–5 done; task 6 — tests/docs/cleanup — pending).**
+**Status: implemented (tasks 1–6 done).**
 
 **References:** `steps-analysis.md` (the step-by-step analysis this plan
 implements), `plans/PLAN_TALKING_HEAD_ONLY.md` (Plan 6 — talking-head only,
@@ -59,6 +59,10 @@ sizes, Audio2Pose), `plans/PLAN_WAV2LIP_EXPNET.md` (Plan 5 — Wav2Lip + ExpNet)
 ---
 
 ## Current behavior
+
+> **Historical (pre-Plan-7).** This section describes the *old* pipeline that
+> Plan 7 replaced; it is kept for context. The current behaviour is the
+> "Expected behavior" below, now implemented.
 
 `crates/avatar-core/src/talking_head.rs::render_talking_head`:
 
@@ -155,6 +159,14 @@ into the warped frame → seam; (b) control points are canonical, not detected.
   if replaced).
 - Commit: `task6: tests, docs and cleanup for the reordered pipeline`
 
+**Done.** Removed the superseded fixed-ellipse mouth path (`RegionBlend`,
+`blend_region`, `blend_mouth`, `fuse_frame`, `warp_from_coeffs`,
+`face_points_neutral`, `FusedFrame`, and the `mouth_mask_*`/`mask_feather`
+config fields) — the whole-face in-paint replaces it. Added the end-to-end
+`talking_head_has_no_inpaint_seam` test (boundary gradient vs. interior median)
+and rewrote the fusion tests against `warp_from_landmarks` / `pose_warp` /
+`patch_to_image`.
+
 ---
 
 ## Verification (unit tests + manual)
@@ -210,16 +222,15 @@ pixels, and the source face has an open eye with no eyelid texture to reveal.
 pose warp (step 5) are displacement warps. Squashing the eye region vertically
 yields a *squished eye*, not a closed eyelid.
 
-**Where it fits.** The **region-blend / in-paint mechanism** (step 3,
-`RegionBlend`), which pastes imagery produced by a *model* rather than
-displacing existing pixels. A blink would be a second region:
+**Where it fits.** The **in-paint mechanism** (step 4, `inpaint::InpaintRegion`),
+which pastes imagery produced by a *model* rather than displacing existing
+pixels. A blink would be a second region:
 
 ```
-RegionBlend {
-    src:    <eyelid imagery from the blink model>,
-    dst:    <eye rect, derived from PFLD eye landmarks>,
-    mask:   <eye ellipse>,
+InpaintRegion {
+    dst:     <eye rect, derived from PFLD eye landmarks>,
     feather: 2 px,
+    // patch: eyelid imagery from the blink model
 }
 ```
 
@@ -244,11 +255,11 @@ Sketch:
 
 **Prerequisites already in place.**
 
-- `RegionBlend` is already generic (src/dst/mask/feather), so adding an eye
-  region is a one-line addition — provided Task 4 writes the in-paint as a
-  **region-blend table** rather than mouth-only.
-- PFLD already returns the eye contours and pupils, so the eye rect / mask can
-  be derived from detected landmarks (no hardcoded eye position).
+- `inpaint::InpaintRegion` is a region table (dst rect + feather), so adding an
+  eye region is a one-line addition — Task 4 wrote the in-paint as a
+  **region table** rather than mouth-only.
+- PFLD already returns the eye contours and pupils, so the eye rect can be
+  derived from detected landmarks (no hardcoded eye position).
 
 **Alternatives (recorded for completeness).**
 
@@ -259,5 +270,6 @@ Sketch:
   replaces ExpNet + Audio2Pose + Wav2Lip entirely (a much larger change).
 
 **Scope note.** This annex is **reference only**. It is not implemented in
-Plan 7; the only related action taken in Plan 7 is to keep `RegionBlend`
-generic (so this can be added later without reworking the pipeline).
+Plan 7; the only related action taken in Plan 7 is to keep the in-paint as a
+generic region table (`inpaint::InpaintRegion`) so this can be added later
+without reworking the pipeline.

@@ -1,33 +1,22 @@
-//! Wav2Lip + ExpNet fusion stage (Plan 5, task 6).
+//! Wav2Lip + ExpNet fusion stage (Plan 5, task 6; reordered Plan 7, task 5).
 //!
-//! Combines, per video frame, the two talking-head signals:
+//! Per-frame building blocks for the reordered talking-head pipeline:
 //!
-//! - **ExpNet** supplies 3DMM-style expression coefficients (64 per frame)
-//!   that drive the *non-lip* facial motion (brows, eyes, mouth corners,
-//!   cheeks) — the audio-driven expression deformation.
-//! - **Wav2Lip** supplies a re-rendered 96×96 face whose mouth matches the
-//!   speech — the *lip articulation*. (Wav2Lip outputs a full face; only its
-//!   mouth sub-rectangle is used.)
+//! - **Expression warp** ([`warp_from_landmarks`]): the 64 ExpNet expression
+//!   coefficients are mapped to displacements on **9 control points** whose
+//!   *positions* come from **PFLD-detected** landmarks (Plan 7, tasks 2–3).
+//!   The warp is `atlas::warp_cpu` (inverse-distance, bilinear).
+//! - **Pose warp** ([`pose_warp`], Plan 6, task 6): the Audio2Pose head-pose
+//!   coefficients (yaw/pitch/roll + tx/ty/tz) are mapped to a 2D affine warp
+//!   (rotate + slight scale/shear/translate).
+//! - **Patch conversion** ([`patch_to_image`]): the Wav2Lip `[3,96,96]`
+//!   channel-major output → RGBA, for the step-4 in-paint.
 //!
-//! The fusion is:
-//!
-//! 1. **Expression warp**: the coefficients are mapped to displacements on
-//!    the existing atlas control points ([`crate::atlas`]), then the source
-//!    face is warped with `atlas::warp_cpu`. The residual / low-frequency
-//!    coefficients drive the coarse expression; we use a small projection to
-//!    the 7-parameter mouth/brow/eye/chin motion.
-//! 2. **Pose warp** (Plan 6, task 6): the Audio2Pose head-pose coefficients
-//!    (yaw/pitch/roll + tx/ty/tz) are mapped to a 2D affine warp (rotate +
-//!    slight scale/translate) applied to the expression-warped frame.
-//! 3. **Mouth blend**: the mouth sub-rectangle of the Wav2Lip face is
-//!    alpha-blended into the lower-face region of the warped frame through a
-//!    smooth elliptical mask ([`RegionBlend`]), so the precise lips replace
-//!    the atlas's deterministic mouth while the source keeps its expression
-//!    and head pose.
-//!
-//! The output is the photorealistic talking-head frame at the configured
-//! resolution (task 9 sets it to the source-image size; 256×256 per the
-//! user decision).
+//! The per-frame orchestration (crop → Wav2Lip → expression warp → in-paint →
+//! pose warp → resize) lives in [`crate::talking_head::render_talking_head`];
+//! the in-paint itself is in [`crate::inpaint`]. The old fixed-ellipse mouth
+//! blend (`RegionBlend` / `blend_mouth` / `fuse_frame`) was removed in Plan 7,
+//! task 6 — it is superseded by the whole-face in-paint, which has no seam.
 //!
 //! [`crate::atlas`]: crate::atlas
 
@@ -63,12 +52,6 @@ pub struct FusionConfig {
     pub size: u32,
     /// Overall warp strength for the expression deformation.
     pub strength: f32,
-    /// Vertical fraction of the frame the mouth mask covers (from the bottom).
-    pub mouth_mask_height: f32,
-    /// Horizontal fraction of the frame the mouth mask covers (centered).
-    pub mouth_mask_width: f32,
-    /// Feather (smooth edge) of the mouth mask, as a fraction of the mask.
-    pub mask_feather: f32,
 }
 
 impl Default for FusionConfig {
@@ -76,9 +59,6 @@ impl Default for FusionConfig {
         Self {
             size: 256,
             strength: 0.5,
-            mouth_mask_height: 0.35,
-            mouth_mask_width: 0.55,
-            mask_feather: 0.3,
         }
     }
 }
@@ -97,38 +77,6 @@ impl FusionConfig {
     }
 }
 
-/// The fused per-frame output.
-pub struct FusedFrame {
-    /// RGBA frame at `FusionConfig::size × size`.
-    pub image: ImageBuffer<Rgba<u8>, Vec<u8>>,
-}
-
-/// Maps 64 ExpNet expression coefficients to a set of control-point
-/// displacements, then warps `src` (the atlas face) into an expression frame.
-///
-/// The mapping is deliberately coarse: 3DMM expression coefficients are
-/// abstract (they need a 3DMM renderer for full fidelity). Here we project
-/// them onto the atlas's 9 control points:
-///
-/// - the first few coefficients drive the mouth (open / corners),
-/// - the next drive the brows (raise / furrow),
-/// - the next drive the eyes (squint),
-/// - the tail drives the chin (jaw).
-///
-/// `strength` scales the displacement; `exp_coeffs` must be 64 long.
-///
-/// The control-point **positions** are the hardcoded canonical ones
-/// ([`face_points_neutral`]). To drive the warp from *detected* landmarks
-/// instead, see [`warp_from_landmarks`].
-pub fn warp_from_coeffs(
-    src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    exp_coeffs: &[f32],
-    strength: f32,
-) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
-    let positions: Vec<[f32; 2]> = face_points_neutral().iter().map(|cp| cp.pos).collect();
-    warp_from_positions(src, exp_coeffs, &positions, strength)
-}
-
 /// Expression warp driven by **detected** control-point positions.
 ///
 /// `landmarks9` are the 9 control points in the order used by
@@ -138,9 +86,8 @@ pub fn warp_from_coeffs(
 /// control points on the actual face; the **displacements** still come from the
 /// (hand-tuned) ExpNet coefficient mapping in [`warp_from_positions`].
 ///
-/// This is the Plan 7 replacement for the canonical positions of
-/// [`warp_from_coeffs`]: the 9 points come from PFLD instead of being
-/// hardcoded, so the warp follows the real face geometry.
+/// This replaced the old canonical-position `warp_from_coeffs`: the 9 points
+/// come from PFLD, so the warp follows the real face geometry.
 pub fn warp_from_landmarks(
     src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     exp_coeffs: &[f32],
@@ -157,12 +104,11 @@ pub fn warp_from_landmarks(
 }
 
 /// Shared expression-warp core: build the 9 control points from the given
-/// **positions** (canonical or detected) and the ExpNet coefficient
-/// **displacements**, then warp `src`.
+/// **positions** (PFLD-detected) and the ExpNet coefficient **displacements**,
+/// then warp `src`.
 ///
-/// Only the positions differ between [`warp_from_coeffs`] (canonical) and
-/// [`warp_from_landmarks`] (PFLD-detected); the displacement mapping — the
-/// hand-tuned ExpNet → motion projection — is identical for both.
+/// The displacement mapping — the hand-tuned ExpNet → motion projection — is
+/// the same for every caller; only the positions vary.
 fn warp_from_positions(
     src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     exp_coeffs: &[f32],
@@ -206,163 +152,6 @@ fn warp_from_positions(
         points: pts,
     };
     warp_cpu(src, &params)
-}
-
-/// Neutral control points (all zero displacement) — the `face_points` list.
-fn face_points_neutral() -> Vec<ControlPoint> {
-    vec![
-        ControlPoint { pos: [0.5, 0.72], disp: [0.0, 0.0] }, // mouth center
-        ControlPoint { pos: [0.42, 0.70], disp: [0.0, 0.0] }, // mouth left
-        ControlPoint { pos: [0.58, 0.70], disp: [0.0, 0.0] }, // mouth right
-        ControlPoint { pos: [0.35, 0.45], disp: [0.0, 0.0] }, // brow left
-        ControlPoint { pos: [0.65, 0.45], disp: [0.0, 0.0] }, // brow right
-        ControlPoint { pos: [0.35, 0.52], disp: [0.0, 0.0] }, // eye left
-        ControlPoint { pos: [0.65, 0.52], disp: [0.0, 0.0] }, // eye right
-        ControlPoint { pos: [0.5, 0.60], disp: [0.0, 0.0] },  // nose
-        ControlPoint { pos: [0.5, 0.88], disp: [0.0, 0.0] },  // chin
-    ]
-}
-
-/// A source→destination region blend: map a sub-rectangle of a source patch
-/// into a rectangle of the frame, then alpha-blend it through a feathered
-/// ellipse. All rectangles are normalized (0..1) so they scale with the frame.
-///
-/// The *mapping* (`src`→`dst`) and the *mask* are independent: the patch may
-/// cover the whole frame (`src`/`dst` = full) while only a small region is
-/// blended (`mask` = the mouth ellipse).
-///
-/// This is the general primitive behind [`blend_mouth`]; other facial regions
-/// (e.g. eyes for blinking) can be added by defining further regions once a
-/// model produces imagery for them.
-#[derive(Debug, Clone, Copy)]
-pub struct RegionBlend {
-    /// Sub-rectangle of the source patch to sample `[x0, y0, x1, y1]`.
-    pub src: [f32; 4],
-    /// Where `src` maps to in the frame `[x0, y0, x1, y1]`.
-    pub dst: [f32; 4],
-    /// Elliptical mask region in the frame `[x0, y0, x1, y1]` where blending
-    /// occurs (the feathered ellipse is inscribed in this rect).
-    pub mask: [f32; 4],
-    /// Feather of the elliptical mask (0 = hard edge, 1 = fully soft).
-    pub feather: f32,
-}
-
-impl RegionBlend {
-    /// The mouth region: the Wav2Lip 96×96 face mapped onto the whole frame
-    /// (full scale), blended only in the bottom-center mouth ellipse.
-    ///
-    /// Wav2Lip outputs a **full face** with the *same framing* as the source
-    /// (its input is the source face resized to 96×96), so the patch maps
-    /// 1:1 onto the frame — the mouth then lands exactly on the source mouth.
-    /// Mapping only a sub-rectangle would shift/stretch the mouth and leave the
-    /// source mouth showing through (a "double mouth").
-    pub fn mouth(cfg: &FusionConfig) -> Self {
-        let w = cfg.mouth_mask_width.clamp(0.0, 1.0);
-        let h = cfg.mouth_mask_height.clamp(0.0, 1.0);
-        let x0 = (1.0 - w) / 2.0;
-        let y0 = 1.0 - h;
-        Self {
-            // Full patch -> full frame (identity framing).
-            src: [0.0, 0.0, 1.0, 1.0],
-            dst: [0.0, 0.0, 1.0, 1.0],
-            // Blend only the bottom-center mouth ellipse.
-            mask: [x0, y0, x0 + w, 1.0],
-            feather: cfg.mask_feather,
-        }
-    }
-}
-
-/// Blends a sub-rectangle of `patch_img` into `frame` through a feathered
-/// ellipse, per `region`. Returns a new frame.
-pub fn blend_region(
-    frame: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    patch_img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    region: &RegionBlend,
-) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
-    let (fw, fh) = frame.dimensions();
-    let (pw, ph) = patch_img.dimensions();
-
-    // Source crop (clamped to the patch).
-    let sx0 = (region.src[0].clamp(0.0, 1.0) * pw as f32) as u32;
-    let sy0 = (region.src[1].clamp(0.0, 1.0) * ph as f32) as u32;
-    let sx1 = ((region.src[2].clamp(0.0, 1.0) * pw as f32).ceil() as u32).min(pw);
-    let sy1 = ((region.src[3].clamp(0.0, 1.0) * ph as f32).ceil() as u32).min(ph);
-    let sx1 = sx1.max(sx0 + 1).min(pw);
-    let sy1 = sy1.max(sy0 + 1).min(ph);
-    let crop = image::imageops::crop_imm(patch_img, sx0, sy0, sx1 - sx0, sy1 - sy0).to_image();
-
-    // Destination rectangle (clamped to the frame).
-    let dx0 = (region.dst[0].clamp(0.0, 1.0) * fw as f32) as u32;
-    let dy0 = (region.dst[1].clamp(0.0, 1.0) * fh as f32) as u32;
-    let dx1 = ((region.dst[2].clamp(0.0, 1.0) * fw as f32).ceil() as u32).min(fw);
-    let dy1 = ((region.dst[3].clamp(0.0, 1.0) * fh as f32).ceil() as u32).min(fh);
-    let dw = dx1.saturating_sub(dx0).max(1);
-    let dh = dy1.saturating_sub(dy0).max(1);
-
-    let resized = image::imageops::resize(&crop, dw, dh, image::imageops::FilterType::Triangle);
-
-    // Mask ellipse (inscribed in the `mask` rect).
-    let mx0 = (region.mask[0].clamp(0.0, 1.0) * fw as f32) as u32;
-    let my0 = (region.mask[1].clamp(0.0, 1.0) * fh as f32) as u32;
-    let mx1 = ((region.mask[2].clamp(0.0, 1.0) * fw as f32).ceil() as u32).min(fw);
-    let my1 = ((region.mask[3].clamp(0.0, 1.0) * fh as f32).ceil() as u32).min(fh);
-    let mw = mx1.saturating_sub(mx0).max(1);
-    let mh = my1.saturating_sub(my0).max(1);
-
-    let mut out = frame.clone();
-    let feather = region.feather.clamp(0.0, 1.0);
-    let cx = mx0 as f32 + mw as f32 / 2.0;
-    let cy = my0 as f32 + mh as f32 / 2.0;
-    let rx = mw as f32 / 2.0;
-    let ry = mh as f32 / 2.0;
-
-    // Iterate the mask region; sample the (resized) patch at the same frame
-    // position so the mapping stays 1:1.
-    for fy in my0..my1 {
-        for fx in mx0..mx1 {
-            // Normalized distance inside the ellipse (0 center, 1 edge).
-            let nx = (fx as f32 - cx) / rx;
-            let ny = (fy as f32 - cy) / ry;
-            let d = (nx * nx + ny * ny).sqrt();
-            if d > 1.0 {
-                continue;
-            }
-            // Smooth alpha: 1 in the core, feather to 0 near the edge.
-            let edge = (1.0 - feather).max(0.0);
-            let alpha = if d <= edge {
-                1.0
-            } else {
-                // Feather band: edge..1 -> alpha 1..0.
-                let t = (d - edge) / (1.0 - edge).max(1e-6);
-                1.0 - t
-            };
-            // Patch sample for this frame pixel (dst-mapped).
-            let px = fx.saturating_sub(dx0).min(dw - 1);
-            let py = fy.saturating_sub(dy0).min(dh - 1);
-            let p = resized.get_pixel(px, py);
-            let dst = out.get_pixel_mut(fx, fy);
-            for c in 0..3 {
-                let blend = p[c] as f32 * alpha + dst[c] as f32 * (1.0 - alpha);
-                dst[c] = blend.clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    out
-}
-
-/// Blends the Wav2Lip mouth patch into the lower-face region of `frame`.
-///
-/// The patch (`[3, 96, 96]` channel-major, values 0..1) is a **full face**; its
-/// mouth sub-rectangle is cropped, resized to the mouth mask region of the
-/// frame, and alpha-blended through a smooth elliptical mask. Returns a new
-/// frame.
-pub fn blend_mouth(
-    frame: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    mouth_patch: &[f32],
-    cfg: &FusionConfig,
-) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
-    let patch_img = patch_to_image(mouth_patch); // 96x96 Rgba (full face)
-    blend_region(frame, &patch_img, &RegionBlend::mouth(cfg))
 }
 
 /// Converts a flat `[3, 96, 96]` (channel-major, CHW) Wav2Lip face patch with
@@ -471,89 +260,10 @@ pub fn pose_warp(
     out
 }
 
-/// Full per-frame fusion: expression-warp the source face, apply the
-/// optional head-pose warp, then blend the Wav2Lip mouth patch in.
-///
-/// - `src`: the avatar source face (already face-cropped).
-/// - `exp_coeffs`: 64 ExpNet expression coefficients for this frame.
-/// - `pose`: optional 6 Audio2Pose head-pose coefficients (yaw/pitch/roll +
-///   tx/ty/tz); `None` applies no pose warp.
-/// - `mouth_patch`: the `[3, 96, 96]` (channel-major) Wav2Lip mouth patch
-///   (values 0..1).
-///
-/// The frame is resized to `cfg.size` at the end.
-pub fn fuse_frame(
-    src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    exp_coeffs: &[f32],
-    pose: Option<&[f32]>,
-    mouth_patch: &[f32],
-    cfg: &FusionConfig,
-) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
-    let mut warped = warp_from_coeffs(src, exp_coeffs, cfg.strength);
-    if let Some(p) = pose {
-        warped = pose_warp(&warped, p, cfg.strength);
-    }
-    let blended = blend_mouth(&warped, mouth_patch, cfg);
-    if blended.dimensions() == (cfg.size, cfg.size) {
-        blended
-    } else {
-        image::imageops::resize(
-            &blended,
-            cfg.size,
-            cfg.size,
-            image::imageops::FilterType::Triangle,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::atlas::test_face_cpu;
-
-    /// T6: the fused output contains BOTH signals —
-    /// 1. the ExpNet expression deformation (a nonzero coefficient changes the
-    ///    warp vs. neutral), and
-    /// 2. the Wav2Lip mouth patch (a bright patch changes the lower-face).
-    #[test]
-    fn fusion_contains_both_signals() {
-        let src = test_face_cpu(128, 128);
-        let cfg = FusionConfig::default().with_size(128);
-
-        // Neutral coefficients (all zero) + a dark patch.
-        let neutral = [0.0f32; 64];
-        let dark_patch = vec![0.0f32; 96 * 96 * 3];
-        let base = fuse_frame(&src, &neutral, None, &dark_patch, &cfg);
-
-        // 1. ExpNet signal: a mouth-open coefficient (index 0 = 1.0) warps the
-        //    mouth, so the fused frame differs from neutral.
-        let mut coeffs = [0.0f32; 64];
-        coeffs[0] = 1.0;
-        let exp_warped = fuse_frame(&src, &coeffs, None, &dark_patch, &cfg);
-        let exp_diff = pixel_diff(&base, &exp_warped);
-        assert!(exp_diff > 0.0, "ExpNet signal should change the frame");
-
-        // 2. Wav2Lip signal: a bright mouth patch changes the lower-face.
-        let bright_patch = vec![1.0f32; 96 * 96 * 3];
-        let lip_blended = fuse_frame(&src, &neutral, None, &bright_patch, &cfg);
-        let lip_diff = pixel_diff(&base, &lip_blended);
-        assert!(lip_diff > 0.0, "Wav2Lip signal should change the frame");
-    }
-
-    /// A nonzero brow coefficient (index 3) moves the brows (expression).
-    #[test]
-    fn brow_coeff_moves_brows() {
-        let src = test_face_cpu(128, 128);
-        let cfg = FusionConfig::default().with_size(128);
-        let dark = vec![0.0f32; 96 * 96 * 3];
-
-        let c0 = [0.0f32; 64];
-        let mut c1 = [0.0f32; 64];
-        c1[3] = 1.0; // brow raise
-        let a = fuse_frame(&src, &c0, None, &dark, &cfg);
-        let b = fuse_frame(&src, &c1, None, &dark, &cfg);
-        assert!(pixel_diff(&a, &b) > 0.0);
-    }
 
     /// The 9 detected control points (a plausible face layout).
     fn sample_landmarks9() -> [[f32; 2]; NUM_CONTROL_POINTS] {
@@ -650,53 +360,41 @@ mod tests {
         );
     }
 
-    /// Neutral coeffs + a black mouth patch darken the mouth mask region.
+    /// A nonzero brow coefficient (index 3) moves the brows (expression), via
+    /// the landmark-driven warp.
     #[test]
-    fn black_patch_darkens_mouth_region() {
-        let src = ImageBuffer::from_pixel(128, 128, Rgba([255u8, 255, 255, 255]));
-        let cfg = FusionConfig::default().with_size(128);
-        let neutral = [0.0f32; 64];
-        let black = vec![0.0f32; 96 * 96 * 3];
+    fn brow_coeff_moves_brows() {
+        let src = test_face_cpu(128, 128);
+        let lm = sample_landmarks9();
 
-        let out = fuse_frame(&src, &neutral, None, &black, &cfg);
-        assert_eq!(out.dimensions(), (128, 128));
-
-        // The mouth region (bottom-center) should be dark from the black patch.
-        let (fw, fh) = out.dimensions();
-        let mouth_y = (fh as f32 * 0.85) as u32;
-        let mouth_x = fw / 2;
-        let p = out.get_pixel(mouth_x, mouth_y);
-        assert!(
-            p[0] < 100,
-            "mouth region should be darkened, got {}",
-            p[0]
-        );
-        // The top of the frame stays white (mask only covers the lower face).
-        let top = out.get_pixel(fw / 2, 5);
-        assert!(top[0] > 200, "top of frame should stay white, got {}", top[0]);
+        let c0 = [0.0f32; 64];
+        let mut c1 = [0.0f32; 64];
+        c1[3] = 1.0; // brow raise
+        let a = warp_from_landmarks(&src, &c0, &lm, 0.5);
+        let b = warp_from_landmarks(&src, &c1, &lm, 0.5);
+        assert!(pixel_diff(&a, &b) > 0.0);
     }
 
-    /// T6: a nonzero pose changes the fused frame vs. no pose.
+    /// T6: a nonzero pose changes the frame vs. no pose.
     #[test]
     fn pose_changes_frame() {
         let src = test_face_cpu(128, 128);
-        let cfg = FusionConfig::default().with_size(128);
-        let neutral = [0.0f32; 64];
-        let dark = vec![0.0f32; 96 * 96 * 3];
-
-        let base = fuse_frame(&src, &neutral, None, &dark, &cfg);
 
         // A roll (rotation) pose should visibly change the frame.
         let pose = [0.0f32, 0.0, 1.0, 0.0, 0.0, 0.0];
-        let posed = fuse_frame(&src, &neutral, Some(&pose), &dark, &cfg);
-        let diff = pixel_diff(&base, &posed);
-        assert!(diff > 0.0, "nonzero pose should change the frame");
+        let posed = pose_warp(&src, &pose, 0.5);
+        assert!(
+            pixel_diff(&src, &posed) > 0.0,
+            "nonzero pose should change the frame"
+        );
 
         // A translation (tx) pose should also change the frame.
         let pose_tx = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
-        let posed_tx = fuse_frame(&src, &neutral, Some(&pose_tx), &dark, &cfg);
-        let diff_tx = pixel_diff(&base, &posed_tx);
-        assert!(diff_tx > 0.0, "nonzero tx pose should change the frame");
+        let posed_tx = pose_warp(&src, &pose_tx, 0.5);
+        assert!(
+            pixel_diff(&src, &posed_tx) > 0.0,
+            "nonzero tx pose should change the frame"
+        );
     }
 
     /// T6: the pose warp is bounded — a large pose does not produce NaN /
@@ -729,25 +427,20 @@ mod tests {
     }
 
     /// Regression: the Wav2Lip patch is channel-major (`[3, 96, 96]`), so a
-    /// patch with a bright R plane and dark G/B planes must render a *red*
-    /// mouth region — not a garbled/tiled or gray one. Indexing the buffer as
+    /// patch with a bright R plane and dark G/B planes must convert to a *red*
+    /// RGBA image — not a garbled/tiled or gray one. Indexing the buffer as
     /// interleaved HWC (the old bug) interleaves the planes and breaks this.
     #[test]
     fn patch_channels_are_planar_not_interleaved() {
-        let src = ImageBuffer::from_pixel(128, 128, Rgba([0u8, 0, 0, 255]));
-        let cfg = FusionConfig::default().with_size(128);
-        let neutral = [0.0f32; 64];
-
         // CHW: plane 0 (R) = 1.0, planes 1 (G) and 2 (B) = 0.0.
         const PLANE: usize = 96 * 96;
         let mut patch = vec![0.0f32; 3 * PLANE];
         patch[..PLANE].fill(1.0);
 
-        let out = fuse_frame(&src, &neutral, None, &patch, &cfg);
+        let img = patch_to_image(&patch);
+        assert_eq!(img.dimensions(), (96, 96));
 
-        // Sample the center of the mouth mask (bottom-center of the frame).
-        let (fw, fh) = out.dimensions();
-        let p = out.get_pixel(fw / 2, (fh as f32 * 0.85) as u32);
+        let p = img.get_pixel(48, 48);
         assert!(
             p[0] > 200 && p[1] < 60 && p[2] < 60,
             "R plane should map to the red channel (got {:?}); \
@@ -756,45 +449,12 @@ mod tests {
         );
     }
 
-    /// Option B: only the mouth sub-rectangle of the Wav2Lip face is blended.
-    /// A patch whose *upper* region (face/eyes) is bright red but whose *mouth*
-    /// region is dark must NOT paint the frame red outside the mouth mask —
-    /// i.e. the whole face is not squashed into the mouth region.
+    /// `patch_to_image` clamps out-of-range values and keeps alpha opaque.
     #[test]
-    fn only_mouth_subrect_of_patch_is_blended() {
-        // White source frame so any red bleed is obvious.
-        let src = ImageBuffer::from_pixel(128, 128, Rgba([255u8, 255, 255, 255]));
-        let cfg = FusionConfig::default().with_size(128);
-        let neutral = [0.0f32; 64];
-
-        const PLANE: usize = 96 * 96;
-        let mut patch = vec![0.0f32; 3 * PLANE];
-        // Upper 60% of the face (rows 0..57) = bright red in the R plane.
-        for y in 0..57usize {
-            for x in 0..96usize {
-                patch[y * 96 + x] = 1.0;
-            }
-        }
-
-        let out = fuse_frame(&src, &neutral, None, &patch, &cfg);
-        let (fw, fh) = out.dimensions();
-
-        // The mouth region (bottom-center) takes the patch's *mouth* sub-rect,
-        // which is dark here -> the frame goes dark there (not red).
-        let mouth = out.get_pixel(fw / 2, (fh as f32 * 0.9) as u32);
-        assert!(
-            mouth[0] < 60,
-            "mouth region should take the patch's dark mouth sub-rect, got {:?}",
-            mouth
-        );
-
-        // The upper face (eyes/brows) must be untouched white — the patch's
-        // upper red region must not leak in.
-        let eyes = out.get_pixel(fw / 2, (fh as f32 * 0.4) as u32);
-        assert!(
-            eyes[0] > 200 && eyes[1] > 200 && eyes[2] > 200,
-            "upper face should be untouched, got {:?}",
-            eyes
-        );
+    fn patch_to_image_clamps_and_is_opaque() {
+        let patch = vec![2.0f32; 96 * 96 * 3]; // above 1.0
+        let img = patch_to_image(&patch);
+        let p = img.get_pixel(10, 10);
+        assert_eq!([p[0], p[1], p[2], p[3]], [255, 255, 255, 255]);
     }
 }

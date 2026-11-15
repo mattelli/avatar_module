@@ -81,10 +81,9 @@ pub fn crop_face_padded(
 /// One in-paint region: the whole `patch` is resized to `dst` (a normalized
 /// rect of the frame) and pasted with a feathered border.
 ///
-/// This is the rectangular analogue of `fusion::RegionBlend` (which uses an
-/// elliptical mask). The in-paint needs a rectangular paste with a ramped
-/// border, so it has its own region type; both are "region tables" so further
-/// regions can be added.
+/// A rectangular paste with a ramped border (the in-paint has no elliptical
+/// mask). It is a "region table" so further regions (e.g. an eye patch for
+/// blinking) can be added without reworking the pipeline.
 #[derive(Debug, Clone, Copy)]
 pub struct InpaintRegion {
     /// Destination rect in the frame `[x0, y0, x1, y1]`, normalized to 0..1.

@@ -343,6 +343,20 @@ mod tests {
             && dir.join("pfld").join(PFLD_WEIGHTS).exists()
     }
 
+    /// Resolves the `.res` asset directory (for the avatar picture).
+    fn res_dir() -> Option<PathBuf> {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let c = dir.join(".res");
+            if c.is_dir() {
+                return Some(c);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
     /// T8: the full talking-head path produces frames at the configured size
     /// for a short synthetic audio clip, on the auto-selected backend (GPU on
     /// this machine — fast; the test skips when weights are absent).
@@ -405,6 +419,76 @@ mod tests {
             })
             .sum();
         assert!(diff > 1e-3, "different audio should produce different frames");
+    }
+
+    /// Plan 7, task 6: the reordered pipeline has **no in-paint seam**. Renders
+    /// a real frame from `avatar.jpg` and checks that the horizontal gradient at
+    /// the paste boundary is not a spike vs. the interior median. Skips when the
+    /// avatar picture is absent.
+    #[test]
+    fn talking_head_has_no_inpaint_seam() {
+        if !models_present() {
+            return;
+        }
+        let Some(res) = res_dir() else { return };
+        let avatar = res.join("avatar.jpg");
+        if !avatar.exists() {
+            return;
+        }
+
+        let sr = MODEL_SAMPLE_RATE;
+        let n = (0.2 * sr as f32) as usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin() * 0.5)
+            .collect();
+
+        let cfg = FusionConfig::default().with_size(256);
+        let frames = render_talking_head(
+            &samples,
+            sr,
+            Some(&avatar),
+            &cfg,
+            Some(7),
+            BackendPreference::Auto,
+        )
+        .unwrap();
+        let frame = &frames[frames.len() / 2];
+
+        // Locate the paste boundary from the detector bbox on the N×N square
+        // (avatar.jpg is 740×740; bbox x=219 w=352 -> right edge 571).
+        let (n_side, _) = (740.0f32, 740.0f32);
+        let scale = cfg.size as f32 / n_side;
+        let x_right = (571.0 * scale).round() as u32;
+        let y0 = (135.0 * scale).round() as u32 + 5;
+        let y1 = (497.0 * scale).round() as u32 - 5;
+
+        // Mean absolute horizontal gradient at column x over rows y0..y1.
+        let col_grad = |x: u32| -> f64 {
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for y in y0..y1 {
+                let a = frame.get_pixel(x, y);
+                let b = frame.get_pixel(x + 1, y);
+                for ch in 0..3 {
+                    s += (a[ch] as f64 - b[ch] as f64).abs();
+                }
+                c += 1.0;
+            }
+            s / (c * 3.0)
+        };
+
+        let mut interior: Vec<f64> = (x_right - 60..x_right - 3).map(col_grad).collect();
+        interior.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = interior[interior.len() / 2].max(1e-6);
+        let boundary = col_grad(x_right);
+
+        // A seam would show as a large spike; require it to stay modest.
+        assert!(
+            boundary / median < 3.0,
+            "in-paint boundary gradient {boundary:.2} is {:.2}x the interior \
+             median {median:.2} — visible seam",
+            boundary / median
+        );
     }
 
     /// T11: end-to-end smoke — render a short talking-head clip, encode +
