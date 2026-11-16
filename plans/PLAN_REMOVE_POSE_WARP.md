@@ -1,6 +1,6 @@
 # PLAN_REMOVE_POSE_WARP.md — Remove step [5] (pose warp) from the talking-head pipeline
 
-**Status: agreed (full removal, decisions below) — ready to start at Task 1.**
+**Status: implemented (Tasks 1–10; all committed).**
 
 ## Goals
 
@@ -214,3 +214,18 @@ end-to-end render (`python examples/render_clip.py`).
   Task 7 deletes only the runtime weights (`.res/models/pose/`) + checksums.
   **Tell me if you also want these raw files removed** (they are ~91 MB + the
   ONNX); otherwise they stay.
+
+## Implementation notes (deviations from the plan)
+
+- **Task 1** also swapped the `talking_head_pose_seed_determinism` test for
+  `talking_head_render_is_deterministic` (that test asserted the removed step-5
+  stochastic behaviour and would otherwise have failed Task 1's verification).
+- **Task 7** produced **no commit**: the whole `.res/` tree is git-ignored
+  (`.gitignore` line 7, `.*/`), so the weight deletion + `CHECKSUMS.txt` edit are
+  filesystem-only. Left as-is per user.
+- **Task 8** also covered `scripts/convert_weights.ps1` (not in the plan's file
+  list), which drove the same `pose.onnx` → `pose.bpk` conversion.
+- **Task 10** produced **no commit** (verification only). `cargo test
+  --workspace` passes; `cargo clippy --workspace` still fails on two
+  **pre-existing** `clippy::erasing_op` errors in `wav2lip::face_input`
+  (`lib.rs:253`), unrelated to this plan (fixed separately).
