@@ -259,7 +259,6 @@ pub fn render_with_stats(
         sr,
         cfg.picture.as_deref(),
         &fcfg,
-        cfg.pose_seed, // Audio2Pose latent seed (Plan 6, task 7)
         pref,
         cfg.fps,
     )

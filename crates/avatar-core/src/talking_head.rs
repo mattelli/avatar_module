@@ -1,5 +1,5 @@
-//! Wav2Lip + ExpNet talking-head render path (Plan 5, task 8; pose Plan 6;
-//! reordered pipeline Plan 7, task 5).
+//! Wav2Lip + ExpNet talking-head render path (Plan 5, task 8; reordered
+//! pipeline Plan 7, task 5).
 //!
 //! Replaces the atlas/warp renderer with a photorealistic talking head. The
 //! order is the Plan 7 reorder (see `steps-analysis.md`):
@@ -41,8 +41,6 @@ pub const TALKING_HEAD_SIZE: u32 = 256;
 pub const WAV2LIP_WEIGHTS: &str = "wav2lip_gan.bpk";
 /// Path to the ExpNet `.bpk` weights.
 pub const EXPNET_WEIGHTS: &str = "expnet.bpk";
-/// Path to the Audio2Pose `.bpk` weights (Plan 6).
-pub const POSE_WEIGHTS: &str = "pose.bpk";
 /// Path to the PFLD `.bpk` weights (Plan 7).
 pub const PFLD_WEIGHTS: &str = "pfld.bpk";
 
@@ -93,9 +91,6 @@ fn frame_count(n_samples: usize, sample_rate: u32, fps: f32) -> usize {
 /// - `samples` / `sr`: the TTS audio (at Piper's rate; resampled internally).
 /// - `picture`: the avatar source image (optional; a synthetic face is used).
 /// - `cfg`: the fusion configuration (output size, warp strength, mask).
-/// - `pose_seed`: optional Audio2Pose latent seed (Plan 6). `None` = sample the
-///   latent `z ~ N(0,1)` per render (stochastic head motion); `Some(seed)` =
-///   reproducible head motion. Head pose is always applied (audio-driven).
 /// - `backend_pref`: optional backend override (defaults to Auto).
 /// - `fps`: output video frame rate. Wav2Lip was trained at 25 fps; other
 ///   rates change the frame count and the mel-window stride (see
@@ -107,7 +102,6 @@ pub fn render_talking_head(
     sr: u32,
     picture: Option<&Path>,
     cfg: &FusionConfig,
-    pose_seed: Option<u64>,
     backend_pref: BackendPreference,
     fps: f32,
 ) -> Result<Vec<ImageBuffer<Rgba<u8>, Vec<u8>>>> {
@@ -128,7 +122,6 @@ pub fn render_talking_head(
     let dir = models_dir().context("no .res/models directory found")?;
     let expnet_weights = dir.join("expnet").join(EXPNET_WEIGHTS);
     let wav2lip_weights = dir.join("wav2lip").join(WAV2LIP_WEIGHTS);
-    let pose_weights = dir.join("pose").join(POSE_WEIGHTS);
     let pfld_weights = dir.join("pfld").join(PFLD_WEIGHTS);
     anyhow::ensure!(
         expnet_weights.exists(),
@@ -141,11 +134,6 @@ pub fn render_talking_head(
         wav2lip_weights.display()
     );
     anyhow::ensure!(
-        pose_weights.exists(),
-        "pose weights not found: {}",
-        pose_weights.display()
-    );
-    anyhow::ensure!(
         pfld_weights.exists(),
         "pfld weights not found: {}",
         pfld_weights.display()
@@ -156,9 +144,6 @@ pub fn render_talking_head(
         .context("load expnet model")?;
     let wav2lip = wav2lip::Wav2Lip::with_backend(&wav2lip_weights, &backend)
         .context("load wav2lip model")?;
-    let audio2pose = pose::Audio2Pose::with_backend(&pose_weights, &backend)
-        .context("load pose model")?
-        .with_seed(pose_seed);
     let pfld = pfld::PFLD::with_backend(&pfld_weights, &backend)
         .context("load pfld model")?;
 
@@ -169,16 +154,6 @@ pub fn render_talking_head(
     let chunks = wav2lip::mel_chunks(&mel, fps);
     anyhow::ensure!(!chunks.is_empty(), "no wav2lip mel chunks");
     let chunk_frames = chunks.len();
-
-    // 5b. Audio embeddings (Wav2Lip encoder) → head-pose motion (Audio2Pose).
-    //     One 512-d embedding per mel chunk; the decoder returns 6 pose values
-    //     per frame (yaw/pitch/roll + tx/ty/tz). Always applied (Plan 6).
-    let audio_emb = wav2lip
-        .audio_embeddings(&chunks, 8)
-        .context("wav2lip audio embeddings")?;
-    let pose_seq = audio2pose
-        .decode(&audio_emb)
-        .context("audio2pose decode")?;
 
     // 6. Source square (step 0): native N×N, no face crop (full frame kept).
     let square = load_source_square(picture)?;
@@ -351,7 +326,6 @@ mod tests {
         let Some(dir) = models_dir() else { return false };
         dir.join("expnet").join(EXPNET_WEIGHTS).exists()
             && dir.join("wav2lip").join(WAV2LIP_WEIGHTS).exists()
-            && dir.join("pose").join(POSE_WEIGHTS).exists()
             && dir.join("pfld").join(PFLD_WEIGHTS).exists()
     }
 
@@ -384,7 +358,7 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(128);
-        let frames = render_talking_head(&samples, sr, None, &cfg, Some(42), BackendPreference::Auto, 25.0).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto, 25.0).unwrap();
         assert_eq!(frames.len(), 5);
         for f in &frames {
             assert_eq!(f.dimensions(), (cfg.size, cfg.size));
@@ -411,8 +385,8 @@ mod tests {
         };
         let cfg = FusionConfig::default().with_size(128);
 
-        let a = render_talking_head(&sine(440.0), sr, None, &cfg, Some(1), BackendPreference::Auto, 25.0).unwrap();
-        let b = render_talking_head(&sine(880.0), sr, None, &cfg, Some(1), BackendPreference::Auto, 25.0).unwrap();
+        let a = render_talking_head(&sine(440.0), sr, None, &cfg, BackendPreference::Auto, 25.0).unwrap();
+        let b = render_talking_head(&sine(880.0), sr, None, &cfg, BackendPreference::Auto, 25.0).unwrap();
         assert_eq!(a.len(), b.len());
 
         // Different audio -> different frames (mouth/expression differ).
@@ -456,7 +430,7 @@ mod tests {
 
         let cfg = FusionConfig::default().with_size(256);
         let frames =
-            render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto, 25.0).unwrap();
+            render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto, 25.0).unwrap();
         assert!(frames.len() >= 4);
 
         // Mean absolute difference between consecutive frames over the whole
@@ -513,7 +487,6 @@ mod tests {
             sr,
             Some(&avatar),
             &cfg,
-            Some(7),
             BackendPreference::Auto,
             25.0,
         )
@@ -572,7 +545,7 @@ mod tests {
             .collect();
 
         let cfg = FusionConfig::default().with_size(256);
-        let frames = render_talking_head(&samples, sr, None, &cfg, Some(7), BackendPreference::Auto, 25.0).unwrap();
+        let frames = render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto, 25.0).unwrap();
         assert_eq!(frames.len(), 3);
 
         let out = std::env::temp_dir().join("avatar_t11_talking_head.mp4");
@@ -620,9 +593,9 @@ mod tests {
             .collect();
         let cfg = FusionConfig::default().with_size(128);
 
-        let a = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto, 25.0)
+        let a = render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto, 25.0)
             .unwrap();
-        let b = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto, 25.0)
+        let b = render_talking_head(&samples, sr, None, &cfg, BackendPreference::Auto, 25.0)
             .unwrap();
         assert_eq!(a.len(), b.len());
         for (fa, fb) in a.iter().zip(b.iter()) {
