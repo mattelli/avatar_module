@@ -5,7 +5,6 @@ members = [
     "crates/avatar-py",
     "crates/wav2lip",
     "crates/expnet",
-    "crates/pose",
     "crates/pfld",
 ]
 
