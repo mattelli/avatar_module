@@ -13,8 +13,6 @@ Options:
     --scale S             upscale displayed/dumped frames by factor S (default 1)
     --no-audio            disable audio playback (video only)
     --size N              output size in px: 64, 128, 256, or 512 (default 256)
-    --pose-seed N         Audio2Pose latent seed for reproducible head motion
-                          (default: stochastic head motion per render)
     --wgpu                use the GPU (burn-wgpu) instead of the default CPU
                           backend (the CPU is faster for these small models on
                           integrated GPUs — see PERF_NOTES.md)
@@ -161,7 +159,6 @@ def main() -> None:
     parser.add_argument("--scale", type=int, default=1, help="upscale factor for display/dump (default 1)")
     parser.add_argument("--no-audio", action="store_true", help="disable audio playback")
     parser.add_argument("--size", type=int, default=128, choices=[64, 128, 256, 512], help="output size in px (default 256)")
-    parser.add_argument("--pose-seed", type=int, default=None, help="Audio2Pose latent seed for reproducible head motion (default: stochastic)")
     parser.add_argument("--wgpu", action="store_true", help="use the GPU (burn-wgpu) instead of the default CPU backend")
     parser.add_argument("--fps", type=float, default=16.0, help="output video frame rate (default 16)")
     args = parser.parse_args()
@@ -177,7 +174,6 @@ def main() -> None:
         face_crop=True,        # center-crop to the detected face
         face_crop_margin=0.35,  # margin around the face box
         backend="gpu" if args.wgpu else "auto",  # default CPU; --wgpu forces burn-wgpu
-        pose_seed=args.pose_seed,  # None = stochastic head motion; int = reproducible
         fps=args.fps,          # output video frame rate
     )
     text = "Hello, how can I help you today? Let me know if you have any questions."  # markers are stripped; audio-driven expression

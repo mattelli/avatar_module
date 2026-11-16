@@ -29,7 +29,6 @@ struct Engine {
     face_crop: bool,
     face_crop_margin: f32,
     backend: Option<avatar_core::pipeline::BackendPref>,
-    pose_seed: Option<u64>,
     speech_speed: f32,
     fps: f32,
 }
@@ -50,14 +49,12 @@ impl Engine {
     ///   (default 0.35).
     /// - `backend`: backend for the talking-head path: "auto" (default; GPU
     ///   when available, CPU otherwise), "gpu", or "cpu".
-    /// - `pose_seed`: optional Audio2Pose latent seed for reproducible head
-    ///   motion (default None = stochastic head motion per render).
     /// - `speech_speed`: speech speed multiplier (default 1.0 = the voice
     ///   model's native rate; < 1.0 = slower, > 1.0 = faster).
     /// - `fps`: output video frame rate (default 25.0). Wav2Lip was trained at
     ///   25 fps; other rates change the frame count and the mel-window stride.
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto", pose_seed=None, speech_speed=1.0, fps=25.0))]
+    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto", speech_speed=1.0, fps=25.0))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
@@ -66,7 +63,6 @@ impl Engine {
         face_crop: bool,
         face_crop_margin: f32,
         backend: &str,
-        pose_seed: Option<u64>,
         speech_speed: f32,
         fps: f32,
     ) -> PyResult<Self> {
@@ -107,7 +103,6 @@ impl Engine {
             face_crop,
             face_crop_margin,
             backend,
-            pose_seed,
             speech_speed,
             fps,
         })
@@ -128,7 +123,6 @@ impl Engine {
             face_crop: self.face_crop,
             face_crop_margin: self.face_crop_margin,
             backend: self.backend,
-            pose_seed: self.pose_seed,
             speech_speed: self.speech_speed,
             fps: self.fps,
         };
@@ -144,12 +138,6 @@ impl Engine {
     #[getter]
     fn size(&self) -> u32 {
         self.size
-    }
-
-    /// Audio2Pose latent seed (None = stochastic head motion).
-    #[getter]
-    fn pose_seed(&self) -> Option<u64> {
-        self.pose_seed
     }
 }
 

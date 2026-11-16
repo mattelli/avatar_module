@@ -32,10 +32,6 @@ pub struct EngineConfig {
     /// Backend override for the talking-head path (GPU/CPU/Auto). `None` =
     /// auto-select (GPU when available, CPU otherwise).
     pub backend: Option<BackendPref>,
-    /// Optional Audio2Pose latent seed (Plan 6). `None` = stochastic head
-    /// motion (a fresh latent `z ~ N(0,1)` per render); `Some(seed)` =
-    /// reproducible head motion.
-    pub pose_seed: Option<u64>,
     /// Speech speed multiplier (default `1.0`). `< 1.0` = slower, `> 1.0` =
     /// faster. Mapped to Piper's `length_scale` as `1 / speech_speed`.
     pub speech_speed: f32,
@@ -84,7 +80,6 @@ impl EngineConfig {
             face_crop: true,
             face_crop_margin: crate::face_crop::DEFAULT_FACE_CROP_MARGIN,
             backend: None,
-            pose_seed: None,
             speech_speed: 1.0,
             fps: crate::analysis::FPS,
         }
@@ -124,13 +119,6 @@ impl EngineConfig {
     /// Forces the backend for the talking-head path (GPU/CPU/Auto).
     pub fn with_backend(mut self, backend: BackendPref) -> Self {
         self.backend = Some(backend);
-        self
-    }
-
-    /// Sets the Audio2Pose latent seed (Plan 6). `None` = stochastic head
-    /// motion; `Some(seed)` = reproducible head motion.
-    pub fn with_pose_seed(mut self, seed: Option<u64>) -> Self {
-        self.pose_seed = seed;
         self
     }
 
