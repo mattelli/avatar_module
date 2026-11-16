@@ -31,6 +31,7 @@ struct Engine {
     backend: Option<avatar_core::pipeline::BackendPref>,
     speech_speed: f32,
     fps: f32,
+    blur_sigma: f32,
 }
 
 #[pymethods]
@@ -53,8 +54,10 @@ impl Engine {
     ///   model's native rate; < 1.0 = slower, > 1.0 = faster).
     /// - `fps`: output video frame rate (default 25.0). Wav2Lip was trained at
     ///   25 fps; other rates change the frame count and the mel-window stride.
+    /// - `blur_sigma`: Gaussian blur sigma applied to the whole output frame
+    ///   (default 0.0 = off). Larger = softer.
     #[new]
-    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto", speech_speed=1.0, fps=25.0))]
+    #[pyo3(signature = (voice_model, picture=None, size=256, strength=0.5, face_crop=true, face_crop_margin=0.35, backend="auto", speech_speed=1.0, fps=25.0, blur_sigma=0.0))]
     fn new(
         voice_model: &str,
         picture: Option<&str>,
@@ -65,6 +68,7 @@ impl Engine {
         backend: &str,
         speech_speed: f32,
         fps: f32,
+        blur_sigma: f32,
     ) -> PyResult<Self> {
         if size != 64 && size != 128 && size != 256 && size != 512 {
             return Err(PyValueError::new_err(format!(
@@ -105,6 +109,7 @@ impl Engine {
             backend,
             speech_speed,
             fps,
+            blur_sigma,
         })
     }
 
@@ -125,6 +130,7 @@ impl Engine {
             backend: self.backend,
             speech_speed: self.speech_speed,
             fps: self.fps,
+            blur_sigma: self.blur_sigma,
         };
         let out_path = std::path::PathBuf::from(out);
         // GIL released: the pipeline is pure native compute.

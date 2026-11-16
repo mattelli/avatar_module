@@ -20,6 +20,8 @@ Options:
                           trained at 25 fps; other rates change the frame count
                           and the mel-window stride (lip timing stays aligned
                           to the audio)
+    --blur-sigma S        Gaussian blur sigma for the whole output frame
+                          (default 0.0 = off; larger = softer)
 
 Dependencies (all optional, graceful fallback):
     - OpenCV (cv2): video playback + frame dumping
@@ -161,6 +163,7 @@ def main() -> None:
     parser.add_argument("--size", type=int, default=128, choices=[64, 128, 256, 512], help="output size in px (default 256)")
     parser.add_argument("--wgpu", action="store_true", help="use the GPU (burn-wgpu) instead of the default CPU backend")
     parser.add_argument("--fps", type=float, default=16.0, help="output video frame rate (default 16)")
+    parser.add_argument("--blur-sigma", type=float, default=0.0, help="Gaussian blur sigma for the whole output frame (default 0.0 = off)")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -175,6 +178,7 @@ def main() -> None:
         face_crop_margin=0.35,  # margin around the face box
         backend="gpu" if args.wgpu else "auto",  # default CPU; --wgpu forces burn-wgpu
         fps=args.fps,          # output video frame rate
+        blur_sigma=args.blur_sigma,  # whole-frame Gaussian blur (0.0 = off)
     )
     text = "Hello, how can I help you today? Let me know if you have any questions."  # markers are stripped; audio-driven expression
     t0 = time.perf_counter()

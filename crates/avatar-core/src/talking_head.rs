@@ -14,7 +14,8 @@
 //!    it, driven by **PFLD-detected** control points (Plan 7, tasks 2–3).
 //! 6. The 112×112 face is resized back to M×M and **in-painted** into the N×N
 //!    square at the bbox rect (2 px feather) — no sub-region mask, no seam.
-//! 7. The frame is resized to the requested output size.
+//! 7. The frame is resized to the requested output size and, when
+//!    `FusionConfig::blur_sigma > 0`, Gaussian-blurred (whole frame).
 //!
 //! Returns RGBA frames at `FusionConfig::size`, which the caller encodes to
 //! MP4 with the existing encoder/muxer (audio keeps the original TTS rate).
@@ -212,7 +213,8 @@ pub fn render_talking_head(
         );
         let square2 = paste_face(&square, &face_m, rect, DEFAULT_FEATHER_PX);
 
-        // Step 5: resize to the requested output size.
+        // Step 5: resize to the requested output size, then Gaussian-blur the
+        // whole frame (uniform, background + face) when `blur_sigma > 0`.
         let frame = if square2.dimensions() == (cfg.size, cfg.size) {
             square2
         } else {
@@ -222,6 +224,11 @@ pub fn render_talking_head(
                 cfg.size,
                 image::imageops::FilterType::Triangle,
             )
+        };
+        let frame = if cfg.blur_sigma > 0.0 {
+            image::imageops::blur(&frame, cfg.blur_sigma)
+        } else {
+            frame
         };
         frames.push(frame);
     }
@@ -365,6 +372,36 @@ mod tests {
             // Frames are (essentially) opaque — the bilinear warp / Triangle
             // resize can attenuate edge alpha slightly.
             assert!(f.pixels().all(|p| p[3] >= 200), "frame alpha too low");
+        }
+    }
+
+    /// Step 5 blur: `blur_sigma = 0.0` is a no-op; a positive sigma changes the
+    /// frame (whole-frame Gaussian blur) and keeps the dimensions.
+    #[test]
+    fn talking_head_blur_sigma_blurs_frame() {
+        if !models_present() {
+            return;
+        }
+        let sr = MODEL_SAMPLE_RATE;
+        let n = (0.2 * sr as f32) as usize; // 5 frames
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin() * 0.5)
+            .collect();
+
+        let base = FusionConfig::default().with_size(128);
+        let blurred = FusionConfig::default().with_size(128).with_blur_sigma(3.0);
+
+        let a = render_talking_head(&samples, sr, None, &base, BackendPreference::Auto, 25.0).unwrap();
+        let b = render_talking_head(&samples, sr, None, &blurred, BackendPreference::Auto, 25.0).unwrap();
+
+        assert_eq!(a.len(), b.len());
+        for (fa, fb) in a.iter().zip(b.iter()) {
+            assert_eq!(fb.dimensions(), (blurred.size, blurred.size));
+            assert_ne!(
+                fa.as_raw(),
+                fb.as_raw(),
+                "blur_sigma > 0 should change the frame vs. blur_sigma = 0"
+            );
         }
     }
 

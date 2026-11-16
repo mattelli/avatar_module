@@ -38,6 +38,9 @@ pub struct EngineConfig {
     /// Output video frame rate (default 25.0). Wav2Lip was trained at 25 fps;
     /// other rates change the frame count and the mel-window stride.
     pub fps: f32,
+    /// Gaussian blur sigma applied to the whole output frame (default `0.0` =
+    /// off). Larger = softer.
+    pub blur_sigma: f32,
 }
 
 /// Backend selection for the talking-head path.
@@ -82,6 +85,7 @@ impl EngineConfig {
             backend: None,
             speech_speed: 1.0,
             fps: crate::analysis::FPS,
+            blur_sigma: 0.0,
         }
     }
 
@@ -134,6 +138,12 @@ impl EngineConfig {
     /// Must be positive.
     pub fn with_fps(mut self, fps: f32) -> Self {
         self.fps = fps;
+        self
+    }
+
+    /// Sets the Gaussian blur sigma for the whole output frame (`0.0` = off).
+    pub fn with_blur_sigma(mut self, sigma: f32) -> Self {
+        self.blur_sigma = sigma;
         self
     }
 }
@@ -237,7 +247,8 @@ pub fn render_with_stats(
     );
     let fcfg = crate::fusion::FusionConfig::default()
         .with_size(cfg.size)
-        .with_strength(cfg.strength);
+        .with_strength(cfg.strength)
+        .with_blur_sigma(cfg.blur_sigma);
     let pref = cfg
         .backend
         .map(BackendPref::to_expnet)

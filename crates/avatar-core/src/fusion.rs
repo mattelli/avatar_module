@@ -49,6 +49,9 @@ pub struct FusionConfig {
     pub size: u32,
     /// Overall warp strength for the expression deformation.
     pub strength: f32,
+    /// Gaussian blur sigma applied to the **whole** output frame (step 5, after
+    /// the resize). `0.0` = off (default). Larger = softer.
+    pub blur_sigma: f32,
 }
 
 impl Default for FusionConfig {
@@ -56,6 +59,7 @@ impl Default for FusionConfig {
         Self {
             size: 256,
             strength: 0.5,
+            blur_sigma: 0.0,
         }
     }
 }
@@ -70,6 +74,12 @@ impl FusionConfig {
     /// Expression warp strength.
     pub fn with_strength(mut self, strength: f32) -> Self {
         self.strength = strength;
+        self
+    }
+
+    /// Gaussian blur sigma for the whole output frame (`0.0` = off).
+    pub fn with_blur_sigma(mut self, sigma: f32) -> Self {
+        self.blur_sigma = sigma;
         self
     }
 }

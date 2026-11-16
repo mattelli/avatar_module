@@ -10,7 +10,7 @@ src ──▶ [0] square image (N×N)
     ──▶ [2] Wav2Lip(clean)
     ──▶ [3] resize (96×96 → 112×112), expression warp (PFLD)
     ──▶ [4] (112×112 → M×M) and in-paint into the square image (N×N)
-    ──▶ [5] resize → frame
+    ──▶ [5] resize + blur → frame
 ```
 
 For each step: **input**, **what** it does, **how** it does it (algorithm +
@@ -173,20 +173,25 @@ added without reworking the pipeline.
 
 ---
 
-## Step 5 — Resize → frame
+## Step 5 — Resize + blur → frame
 
-**Where:** `talking_head.rs::render_talking_head` (final resize).
+**Where:** `talking_head.rs::render_talking_head` (final resize + blur).
 
 | | |
 |---|---|
-| **Input** | `sq2` (N×N); `size` ∈ {64,128,256,512} |
-| **What** | scale to the requested output size |
-| **How** | `imageops::resize(…, size, size, Triangle)` (optionally `CatmullRom`/`Lanczos3`) |
+| **Input** | `sq2` (N×N); `size` ∈ {64,128,256,512}; `blur_sigma` |
+| **What** | scale to the requested output size, then Gaussian-blur the **whole** frame |
+| **How** | ① `imageops::resize(…, size, size, Triangle)` (optionally `CatmullRom`/`Lanczos3`); ② if `blur_sigma > 0.0`, `imageops::blur(&frame, blur_sigma)` (separable Gaussian, sigma-based) |
 | **Output** | RGBA **size×size** — the final video frame |
 
 Notes: N→512 is a downscale for `avatar.jpg` (N=740); for a small source it may
 be an upscale and is inherently soft (**accepted**). "Smooth" = the interpolation
 filter; it cannot recover missing detail.
+
+The blur is **uniform** (background **and** face), **constant per frame**, and
+**off by default** (`blur_sigma = 0.0`). It is exposed as `FusionConfig::blur_sigma`
+→ `EngineConfig::blur_sigma` → Python `Engine(blur_sigma=…)` → CLI
+`--blur-sigma`.
 
 > **Pose warp removed.** Earlier versions applied an audio-driven 2D affine
 > head-pose warp (Audio2Pose → `fusion::pose_warp`) on the whole N×N frame
@@ -206,7 +211,7 @@ filter; it cannot recover missing detail.
 | 2 | `face96` + mel chunk | `w2l` | 96×96 |
 | 3 | `w2l` + coeffs | `expr` (+ PFLD landmarks) | 112×112 |
 | 4 | `expr` + bbox + `sq` | `sq2` | N×N |
-| 5 | `sq2` + size | frame | size×size |
+| 5 | `sq2` + size + `blur_sigma` | frame | size×size |
 
 ---
 

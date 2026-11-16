@@ -25,7 +25,8 @@ an integrated GPU the GPU path is **slower** than CPU. Measured (release build,
 `cargo run -p avatar-core --example talking_head_bench`
 
 Renders a 440 Hz sine clip through the full talking-head path (resample →
-ExpNet → Wav2Lip → PFLD expression warp → in-paint → N×N frames).
+ExpNet → Wav2Lip → PFLD expression warp → in-paint → resize → optional
+whole-frame Gaussian blur → N×N frames).
 
 | Backend | Audio | Frames | Total | s/frame |
 |---------|-------|--------|-------|---------|

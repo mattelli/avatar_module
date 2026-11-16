@@ -29,7 +29,7 @@ engine.render("Hello world. Great news.", "clip.mp4")
 ```
 text ──▶ Piper TTS ──▶ audio (16 kHz) ──▶ ExpNet ──▶ expression coefficients ──┐
                                                                               │
-picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ face ──▶ PFLD expr warp ──┴─▶ in-paint ──▶ N×N frames ──▶ MP4
+picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ face ──▶ PFLD expr warp ──┴─▶ in-paint ──▶ resize ──▶ (blur) ──▶ MP4
 ```
 
 | Stage | Crate / module | What it does |
@@ -150,7 +150,8 @@ let cfg = EngineConfig::voice(".res/en_US-hfc_female-medium.onnx")
     .with_picture("portrait.png")
     .with_size(256)               // 64 | 128 | 256 | 512
     .with_strength(0.5)           // photo ~0.5, cartoon ~1.0
-    .with_speech_speed(0.8);      // < 1.0 = slower, > 1.0 = faster
+    .with_speech_speed(0.8)       // < 1.0 = slower, > 1.0 = faster
+    .with_blur_sigma(0.0);        // whole-frame Gaussian blur (0.0 = off)
 let (frames, elapsed) = render_with_stats("Hello world", "out.mp4", &cfg)?;
 ```
 
@@ -169,6 +170,7 @@ engine = live_avatar.Engine(
     face_crop_margin=0.35,        # margin around the face box
     backend="auto",               # "auto" | "gpu" | "cpu"
     speech_speed=1.0,             # < 1.0 = slower, > 1.0 = faster
+    blur_sigma=0.0,               # whole-frame Gaussian blur (0.0 = off)
 )
 frames = engine.render("Hello world", "out.mp4")  # GIL released
 ```
