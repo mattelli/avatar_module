@@ -239,7 +239,9 @@ pub fn face_input(face: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> FaceInput {
         IMG_SIZE,
         image::imageops::FilterType::Triangle,
     );
-    let mut data = vec![0.0f32; 6 * 96 * 96];
+    // Channel-major (planar) layout: channel `c` occupies `[c*plane, (c+1)*plane)`.
+    let plane = (IMG_SIZE * IMG_SIZE) as usize; // 96 * 96 = 9216
+    let mut data = vec![0.0f32; 6 * plane];
     let hw = (IMG_SIZE / 2) as usize; // 48
 
     for y in 0..IMG_SIZE as usize {
@@ -248,15 +250,16 @@ pub fn face_input(face: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> FaceInput {
             let r = p[0] as f32 / 255.0;
             let g = p[1] as f32 / 255.0;
             let b = p[2] as f32 / 255.0;
+            let base = y * IMG_SIZE as usize + x;
             // Channels 0-2: masked (lower half zeroed).
             let masked = y >= hw;
-            data[(0) * 96 * 96 + y * 96 + x] = if masked { 0.0 } else { r };
-            data[(1) * 96 * 96 + y * 96 + x] = if masked { 0.0 } else { g };
-            data[(2) * 96 * 96 + y * 96 + x] = if masked { 0.0 } else { b };
+            data[base] = if masked { 0.0 } else { r };
+            data[plane + base] = if masked { 0.0 } else { g };
+            data[2 * plane + base] = if masked { 0.0 } else { b };
             // Channels 3-5: full face.
-            data[(3) * 96 * 96 + y * 96 + x] = r;
-            data[(4) * 96 * 96 + y * 96 + x] = g;
-            data[(5) * 96 * 96 + y * 96 + x] = b;
+            data[3 * plane + base] = r;
+            data[4 * plane + base] = g;
+            data[5 * plane + base] = b;
         }
     }
     FaceInput { data }
