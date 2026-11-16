@@ -4,10 +4,9 @@ Text → MP4 avatar video, entirely in Rust (with a Python ≥ 3.10 wrapper).
 
 Give it a sentence and a front-facing photo, and it produces an MP4 of a
 photorealistic talking avatar. The **talking-head** backend is the only
-backend (Plan 6): Wav2Lip + ExpNet + Audio2Pose (Burn, CPU by default)
+backend (Plan 6): Wav2Lip + ExpNet (Burn, CPU by default)
 produce a clip at **64×64, 128×128, 256×256, or 512×512** px (default
-**256×256**) — precise lips from Wav2Lip, audio-driven expression from ExpNet,
-and audio-driven head motion (yaw/pitch/roll + translation) from Audio2Pose.
+**256×256**) — precise lips from Wav2Lip and audio-driven expression from ExpNet.
 
 Expression markers (`<happy>`/`<sad>`/...) are stripped — expression is
 audio-driven.
@@ -21,7 +20,6 @@ engine = live_avatar.Engine(
     size=256,                                    # 64, 128, 256, or 512 px
     face_crop=True,                              # center-crop to the detected face
     face_crop_margin=0.35,                       # margin around the face box
-    pose_seed=None,                              # None = stochastic head motion; int = reproducible
 )
 engine.render("Hello world. Great news.", "clip.mp4")
 ```
@@ -30,19 +28,17 @@ engine.render("Hello world. Great news.", "clip.mp4")
 
 ```
 text ──▶ Piper TTS ──▶ audio (16 kHz) ──▶ ExpNet ──▶ expression coefficients ──┐
-                                          │                                     │
-                                          └▶ Wav2Lip audio encoder ──▶ 512-d ──▶ Audio2Pose ──▶ pose (6/frame) ─┤
-picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ face ──▶ PFLD expr warp ──┴─▶ in-paint ──▶ pose warp ──▶ N×N frames ──▶ MP4
+                                                                              │
+picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ face ──▶ PFLD expr warp ──┴─▶ in-paint ──▶ N×N frames ──▶ MP4
 ```
 
 | Stage | Crate / module | What it does |
 |-------|----------------|--------------|
 | TTS | `avatar-core::tts` | Embedded Piper (`piper-rs`): PCM + phoneme timings |
 | ExpNet | `crates/expnet` | Audio → 3DMM-style expression coefficients (Burn, task 3) |
-| Wav2Lip | `crates/wav2lip` | Audio + face → precise 96×96 face; also exposes the 512-d audio encoder embedding (Burn, task 4) |
+| Wav2Lip | `crates/wav2lip` | Audio + face → precise 96×96 face (Burn, task 4) |
 | PFLD | `crates/pfld` | 112×112 face → 98 landmarks → 9 expression-warp control points (Burn, Plan 7) |
-| Audio2Pose | `crates/pose` | Audio embeddings → head-pose motion (yaw/pitch/roll + tx/ty/tz), optional-seeded latent (Burn, Plan 6) |
-| Fusion | `avatar-core::fusion` | Per-frame landmark-driven expression warp + 2D affine pose warp (Plan 7) |
+| Fusion | `avatar-core::fusion` | Per-frame landmark-driven expression warp (Plan 7) |
 | In-paint | `avatar-core::inpaint` | Tight bbox crop + 2 px-feathered paste of the Wav2Lip face back into the N×N square (Plan 7) |
 | Talking head | `avatar-core::talking_head` | Orchestrates the reordered pipeline → N×N frames (Plan 7) |
 | Encode | `avatar-core::encoder` | H.264 (`openh264`) + AAC (`fdk-aac` feature; silent placeholder otherwise) → MP4 (`mp4` crate) |
@@ -51,7 +47,7 @@ picture ──▶ square N×N ──▶ bbox crop ──▶ Wav2Lip ──▶ fa
 ## Building
 
 ```bash
-cargo test                 # 97 tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, pose, fusion, inpaint, talking-head
+cargo test                 # tests: parser, TTS, encoder, pipeline, expnet, wav2lip, pfld, fusion, inpaint, talking-head
 ```
 
 The Python wheel (one wheel for all Python ≥ 3.10 thanks to abi3):
@@ -70,7 +66,7 @@ pip install dist/live_avatar-*.whl
 
 ### Rebuilding the wheel
 
-The talking-head backend (Wav2Lip + ExpNet + Audio2Pose) is the **only**
+The talking-head backend (Wav2Lip + ExpNet) is the **only**
 backend, so it is always compiled — there is no feature flag to enable. A
 wheel built with the default `aac` feature has an audible audio track:
 
@@ -82,7 +78,7 @@ maturin build --release -o dist -m crates/avatar-py/Cargo.toml
 ```
 
 > The backend requires the model weights (`wav2lip_gan.bpk`, `expnet.bpk`,
-> `pose.bpk`, and `pfld.bpk` under `.res/models/{wav2lip,expnet,pose,pfld}/`).
+> and `pfld.bpk` under `.res/models/{wav2lip,expnet,pfld}/`).
 > It runs on the **CPU** by default — these models are small and the GPU path
 > is slower on integrated GPUs (see `PERF_NOTES.md`). Force the GPU with
 > `backend="gpu"` when a discrete GPU is present.
@@ -149,12 +145,11 @@ the pipeline falls back to using the whole picture (rendering never fails).
 use avatar_core::pipeline::{render, render_with_stats, EngineConfig};
 
 // Talking-head backend (the only backend; requires model weights in
-// .res/models/{wav2lip,expnet,pose,pfld}/*.bpk):
+// .res/models/{wav2lip,expnet,pfld}/*.bpk):
 let cfg = EngineConfig::voice(".res/en_US-hfc_female-medium.onnx")
     .with_picture("portrait.png")
     .with_size(256)               // 64 | 128 | 256 | 512
     .with_strength(0.5)           // photo ~0.5, cartoon ~1.0
-    .with_pose_seed(Some(42))     // None = stochastic head motion
     .with_speech_speed(0.8);      // < 1.0 = slower, > 1.0 = faster
 let (frames, elapsed) = render_with_stats("Hello world", "out.mp4", &cfg)?;
 ```
@@ -173,16 +168,12 @@ engine = live_avatar.Engine(
     face_crop=True,               # center-crop to the detected face
     face_crop_margin=0.35,        # margin around the face box
     backend="auto",               # "auto" | "gpu" | "cpu"
-    pose_seed=None,               # None = stochastic head motion; int = reproducible
     speech_speed=1.0,             # < 1.0 = slower, > 1.0 = faster
 )
 frames = engine.render("Hello world", "out.mp4")  # GIL released
 ```
 
-Expression markers are stripped — expression is audio-driven (Plan 5). Head
-motion (yaw/pitch/roll + translation) is audio-driven (Audio2Pose, Plan 6);
-pass `pose_seed=<int>` for a reproducible render, or leave `None` for a fresh
-latent each render.
+Expression markers are stripped — expression is audio-driven (Plan 5).
 
 ## Example
 
@@ -220,7 +211,9 @@ python examples/render_clip.py --frame 10   # dump frame 10 as PNG
 - `plans/PLAN_FIX_RENDER_ISSUES.md` — fixes silent audio, flicker, and input
   picture downscaling
 - `plans/PLAN_REORDER_PIPELINE.md` — reordered pipeline: Wav2Lip on a tight
-  crop → PFLD expression warp → 2 px in-paint → pose warp (Plan 7, implemented)
+  crop → PFLD expression warp → 2 px in-paint (Plan 7, implemented)
+- `plans/PLAN_REMOVE_POSE_WARP.md` — remove the pose warp (Audio2Pose) step and
+  all its machinery (implemented)
 
 ## License
 

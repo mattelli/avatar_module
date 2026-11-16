@@ -1,6 +1,6 @@
 # steps-analysis.md — Talking-head pipeline: step-by-step analysis
 
-**Status: implemented (Plan 7, tasks 1–6).**
+**Status: implemented (Plan 7, tasks 1–6; pose warp removed).**
 
 This document analyses the **agreed pipeline**:
 
@@ -10,8 +10,7 @@ src ──▶ [0] square image (N×N)
     ──▶ [2] Wav2Lip(clean)
     ──▶ [3] resize (96×96 → 112×112), expression warp (PFLD)
     ──▶ [4] (112×112 → M×M) and in-paint into the square image (N×N)
-    ──▶ [5] pose warp
-    ──▶ [6] resize → frame
+    ──▶ [5] resize → frame
 ```
 
 For each step: **input**, **what** it does, **how** it does it (algorithm +
@@ -27,14 +26,14 @@ File references are to `crates/avatar-core/src/` unless noted.
 |---|----------|
 | 1 | **Landmark model: PFLD** — convert `pfld.onnx` (33 KB) → `.bpk`, place in `.res/models/pfld/`, load like Wav2Lip/ExpNet |
 | 2 | PFLD-pytorch checkpoint **license: not a concern** (per user) |
-| 3 | **Landmarks detected on the clean face**; **expression warp before pose warp** |
+| 3 | **Landmarks detected on the clean face**; **expression warp runs on the step-1 crop** (before the in-paint) |
 | 4 | **ExpNet → displacement mapping stays hand-tuned** (confirmed) |
 | 5 | **Wav2Lip framing: tighter detected-bbox crop** (`crop_face`), not the whole square |
 | 6 | **Per-frame Wav2Lip: one clean face per chunk, reused across frames** (see step 2) |
 | 7 | The 96→size upscale blur is **accepted** |
 | 8 | **In-paint boundary ramp = 2 px** (step 3) |
 | 9 | **N = the input image's square size** (e.g. N = 740 for `avatar.jpg`); no face crop at step 0 |
-| 10 | **Steps 4–5 run at 112×112** (PFLD's resolution) |
+| 10 | **Step 3 (expression warp) runs at 112×112** (PFLD's resolution) |
 
 ---
 
@@ -174,33 +173,13 @@ added without reworking the pipeline.
 
 ---
 
-## Step 5 — Pose warp
+## Step 5 — Resize → frame
 
-**Where:** `fusion.rs::pose_warp` (lines 355–416).
-
-| | |
-|---|---|
-| **Input** | `sq2` (N×N); `pose[6]` = `[yaw,pitch,roll,tx,ty,tz]` (Audio2Pose); `strength` |
-| **What** | apply **audio-driven head motion** — rotation, slight shear, scale, translation — as one 2D affine transform about the frame centre |
-| **How** | clamp each component to `[-1,1]`; parameters (× `strength`): `ang = roll·6.0`; `shear_x = yaw·3.0`; `shear_y = pitch·2.0`; `off_x = tx·2.5·w`, `off_y = ty·2.5·h`; `scale = 1 + tz·0.5`. Per output pixel: coords about centre → **inverse** transform (rotate→scale→shear→translate) → clamp to edges → bilinear sample |
-| **Output** | `posed` — RGBA **N×N** |
-
-Notes: 2D affine approximation of 3D head pose. Edge clamping → bounded, no NaN.
-The pose warp runs on the **whole N×N frame** (after the in-paint), so the
-background moves with the face — a camera-motion look (user-confirmed). Because
-the expression warp already ran (step 3) and the face was pasted back (step 4),
-the head pose is applied to the **whole** frame — mouth included — so there is
-**no seam**.
-
----
-
-## Step 6 — Resize → frame
-
-**Where:** new (analogous to the final `resize` in `fuse_frame`, lines 441–448).
+**Where:** `talking_head.rs::render_talking_head` (final resize).
 
 | | |
 |---|---|
-| **Input** | `posed` (N×N); `size` ∈ {64,128,256,512} |
+| **Input** | `sq2` (N×N); `size` ∈ {64,128,256,512} |
 | **What** | scale to the requested output size |
 | **How** | `imageops::resize(…, size, size, Triangle)` (optionally `CatmullRom`/`Lanczos3`) |
 | **Output** | RGBA **size×size** — the final video frame |
@@ -208,6 +187,13 @@ the head pose is applied to the **whole** frame — mouth included — so there 
 Notes: N→512 is a downscale for `avatar.jpg` (N=740); for a small source it may
 be an upscale and is inherently soft (**accepted**). "Smooth" = the interpolation
 filter; it cannot recover missing detail.
+
+> **Pose warp removed.** Earlier versions applied an audio-driven 2D affine
+> head-pose warp (Audio2Pose → `fusion::pose_warp`) on the whole N×N frame
+> between the in-paint and this resize. It was removed: the render now goes
+> straight from the in-paint (step 4) to the resize. The Audio2Pose model, the
+> Wav2Lip audio-encoder embedding API, the `pose` crate and the `pose_seed`
+> knob were removed with it.
 
 ---
 
@@ -220,8 +206,7 @@ filter; it cannot recover missing detail.
 | 2 | `face96` + mel chunk | `w2l` | 96×96 |
 | 3 | `w2l` + coeffs | `expr` (+ PFLD landmarks) | 112×112 |
 | 4 | `expr` + bbox + `sq` | `sq2` | N×N |
-| 5 | `sq2` + pose | `posed` | N×N |
-| 6 | `posed` + size | frame | size×size |
+| 5 | `sq2` + size | frame | size×size |
 
 ---
 
@@ -238,11 +223,12 @@ src ──▶ expression warp ──▶ pose warp ──▶ [blend Wav2Lip(src) 
 ```
 src ─▶ [0] square N×N ─▶ [1] bbox crop M×M → 96×96 ─▶ [2] Wav2Lip(clean)
     ─▶ [3] 96×96 → 112×112, expression warp (PFLD) ─▶ [4] 112×112 → M×M, in-paint into N×N
-    ─▶ [5] pose warp ─▶ [6] resize ─▶ frame
+    ─▶ [5] resize ─▶ frame
 ```
 - Wav2Lip on a **tightly cropped clean face** → best lips.
 - Whole face pasted back (no sub-region mask) → **no seam**.
 - Control points **detected** (PFLD) → not input-agnostic.
+- No head-pose warp (the Audio2Pose step was removed).
 
 ---
 
@@ -252,7 +238,7 @@ src ─▶ [0] square N×N ─▶ [1] bbox crop M×M → 96×96 ─▶ [2] Wav2L
 |---|---|
 | PFLD → Burn | Convert `pfld.onnx` (33 KB) → `.bpk`; place in `.res/models/pfld/`; load like Wav2Lip/ExpNet |
 | PFLD license | Not a concern (user) |
-| Detection face | Clean (unwarped) face; expression warp before pose warp |
+| Detection face | Clean (unwarped) face; expression warp runs on the step-1 crop (before the in-paint) |
 | ExpNet→displacement mapping | Stays hand-tuned |
 | Wav2Lip framing | Tighter detected-bbox crop (`crop_face`) |
 | Per-frame Wav2Lip | One clean face per chunk, reused across frames; batch chunks (default 8) |
@@ -272,6 +258,6 @@ src ─▶ [0] square N×N ─▶ [1] bbox crop M×M → 96×96 ─▶ [2] Wav2L
 3. **N and M** — N = the input square size (e.g. 740); M = the detected bbox
    size. Resize chain: 96 (Wav2Lip) → 112 (PFLD/warp) → M (in-paint) → N (square)
    → size (output).
-4. **Performance:** step 5 warps the N×N frame (e.g. 740×740) and step 6
-   downscales to `size`. N is kept **native** (user-confirmed); consider capping
-   at `min(N, 512)` if the warp proves slow.
+4. **Performance:** step 5 downscales the N×N square (e.g. 740×740) to `size`.
+   N is kept **native** (user-confirmed); consider capping at `min(N, 512)` if
+   the in-paint proves slow.
