@@ -6,14 +6,11 @@
 //!   coefficients are mapped to displacements on **9 control points** whose
 //!   *positions* come from **PFLD-detected** landmarks (Plan 7, tasks 2–3).
 //!   The warp is `atlas::warp_cpu` (inverse-distance, bilinear).
-//! - **Pose warp** ([`pose_warp`], Plan 6, task 6): the Audio2Pose head-pose
-//!   coefficients (yaw/pitch/roll + tx/ty/tz) are mapped to a 2D affine warp
-//!   (rotate + slight scale/shear/translate).
 //! - **Patch conversion** ([`patch_to_image`]): the Wav2Lip `[3,96,96]`
 //!   channel-major output → RGBA, for the step-4 in-paint.
 //!
 //! The per-frame orchestration (crop → Wav2Lip → expression warp → in-paint →
-//! pose warp → resize) lives in [`crate::talking_head::render_talking_head`];
+//! resize) lives in [`crate::talking_head::render_talking_head`];
 //! the in-paint itself is in [`crate::inpaint`]. The old fixed-ellipse mouth
 //! blend (`RegionBlend` / `blend_mouth` / `fuse_frame`) was removed in Plan 7,
 //! task 6 — it is superseded by the whole-face in-paint, which has no seam.
@@ -191,93 +188,6 @@ pub fn patch_to_image(patch: &[f32]) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     img
 }
 
-/// Applies a 2D affine head-pose warp to `src`.
-///
-/// The Audio2Pose coefficients are `[yaw, pitch, roll, tx, ty, tz]`:
-///
-/// - `yaw` (about the vertical axis) → horizontal shear
-/// - `pitch` (about the horizontal axis) → vertical shear
-/// - `roll` (about the view axis) → rotation
-/// - `tx` / `ty` → 2D translation (offset)
-/// - `tz` → scale (toward / away from the camera)
-///
-/// The transform is applied about the frame center so the head rotates
-/// around its own centre rather than drifting. The output is the same size
-/// as `src`; out-of-bounds samples clamp to the edge (bounded).
-///
-/// `pose` must be 6 values long; `strength` scales the whole effect.
-pub fn pose_warp(
-    src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    pose: &[f32],
-    strength: f32,
-) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
-    let (w, h) = src.dimensions();
-    let (w, h) = (w as usize, h as usize);
-    let (cw, ch) = (w as f32 / 2.0, h as f32 / 2.0);
-
-    // Clamp each pose component to keep the warp bounded.
-    let yaw = pose.first().copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-    let pitch = pose.get(1).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-    let roll = pose.get(2).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-    let tx = pose.get(3).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-    let ty = pose.get(4).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-    let tz = pose.get(5).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-
-    // Rotation (roll) about the centre.
-    //
-    // Gain calibration: Audio2Pose emits *normalized* coefficients whose
-    // per-clip range is small (measured on a 1 s clip: yaw ~0.02, pitch ~0.03,
-    // roll ~0.01, tx/ty ~0.01, tz ~0.12 peak-to-peak). In SadTalker these feed
-    // a 3DMM renderer that supplies the geometric gain; this 2D-affine
-    // approximation has none, so the gains below add it explicitly. They are
-    // chosen so each component produces a visible, natural motion at the
-    // default `strength` (0.5): roll ~2°, yaw/pitch shear ~10 px at the frame
-    // edge, translation ~8 px, scale ~3 %.
-    let ang = roll * 6.0 * strength;
-    let (sin_a, cos_a) = ang.sin_cos();
-    // Shear from yaw/pitch (small, bounded).
-    let shear_x = yaw * 3.0 * strength;
-    let shear_y = pitch * 2.0 * strength;
-    // Translation (offset) and scale (tz).
-    let off_x = tx * 2.5 * strength * w as f32;
-    let off_y = ty * 2.5 * strength * h as f32;
-    let scale = 1.0 + tz * 0.5 * strength;
-
-    let mut out = ImageBuffer::new(w as u32, h as u32);
-    for y in 0..h {
-        for x in 0..w {
-            // Normalized coords about the centre.
-            let (nx, ny) = (x as f32 - cw, y as f32 - ch);
-            // Inverse transform: apply rotation, shear, scale, then translate.
-            // We sample the source at the inverse-mapped position.
-            let (rx, ry) = (nx * cos_a + ny * sin_a, -nx * sin_a + ny * cos_a);
-            let (sx, sy) = (rx / scale, ry / scale);
-            let (px, py) = (sx - shear_x * sy, sy - shear_y * sx);
-            // Source pixel (clamped to edges -> bounded).
-            let sx = (px + cw - off_x).clamp(0.0, w as f32 - 1.0);
-            let sy = (py + ch - off_y).clamp(0.0, h as f32 - 1.0);
-            let x0 = (sx.floor() as usize).min(w - 1);
-            let y0 = (sy.floor() as usize).min(h - 1);
-            let x1 = (x0 + 1).min(w - 1);
-            let y1 = (y0 + 1).min(h - 1);
-            let fx = sx - x0 as f32;
-            let fy = sy - y0 as f32;
-            let p00 = src.get_pixel(x0 as u32, y0 as u32);
-            let p10 = src.get_pixel(x1 as u32, y0 as u32);
-            let p01 = src.get_pixel(x0 as u32, y1 as u32);
-            let p11 = src.get_pixel(x1 as u32, y1 as u32);
-            let mut px = [0u8; 4];
-            for c in 0..4 {
-                let top = p00[c] as f32 * (1.0 - fx) + p10[c] as f32 * fx;
-                let bot = p01[c] as f32 * (1.0 - fx) + p11[c] as f32 * fx;
-                px[c] = (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 255.0) as u8;
-            }
-            out.put_pixel(x as u32, y as u32, Rgba(px));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,75 +356,6 @@ mod tests {
         let a = warp_from_landmarks(&src, &c0, &lm, 0.5);
         let b = warp_from_landmarks(&src, &c1, &lm, 0.5);
         assert!(pixel_diff(&a, &b) > 0.0);
-    }
-
-    /// T6: a nonzero pose changes the frame vs. no pose.
-    #[test]
-    fn pose_changes_frame() {
-        let src = test_face_cpu(128, 128);
-
-        // A roll (rotation) pose should visibly change the frame.
-        let pose = [0.0f32, 0.0, 1.0, 0.0, 0.0, 0.0];
-        let posed = pose_warp(&src, &pose, 0.5);
-        assert!(
-            pixel_diff(&src, &posed) > 0.0,
-            "nonzero pose should change the frame"
-        );
-
-        // A translation (tx) pose should also change the frame.
-        let pose_tx = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
-        let posed_tx = pose_warp(&src, &pose_tx, 0.5);
-        assert!(
-            pixel_diff(&src, &posed_tx) > 0.0,
-            "nonzero tx pose should change the frame"
-        );
-    }
-
-    /// Regression (invisible pose): Audio2Pose emits *small* normalized
-    /// coefficients (per-clip range ~0.01–0.12). With the old gains those
-    /// produced sub-pixel motion (invisible). The calibrated gains must make
-    /// such realistic magnitudes move the frame *visibly*.
-    #[test]
-    fn small_realistic_pose_moves_frame_visibly() {
-        let src = test_face_cpu(256, 256);
-        // Realistic per-frame magnitudes measured from Audio2Pose.
-        let pose = [0.02f32, 0.03, 0.012, 0.009, 0.008, 0.12];
-        let posed = pose_warp(&src, &pose, 0.5);
-
-        // Mean absolute difference per channel over the whole frame.
-        let mut sum = 0.0f64;
-        let mut n = 0.0f64;
-        for (p, q) in src.pixels().zip(posed.pixels()) {
-            for c in 0..3 {
-                sum += (p[c] as f64 - q[c] as f64).abs();
-                n += 1.0;
-            }
-        }
-        let mean = sum / n;
-        assert!(
-            mean > 1.0,
-            "realistic pose should visibly move the frame (mean diff {mean:.3}/255); \
-             the pose-warp gains are probably too small"
-        );
-    }
-
-    /// T6: the pose warp is bounded — a large pose does not produce NaN /
-    /// garbage and keeps the same dimensions.
-    #[test]
-    fn pose_warp_is_bounded() {
-        let src = test_face_cpu(64, 64);
-        // Extreme pose values (clamped internally).
-        let pose = [1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0];
-        let out = pose_warp(&src, &pose, 1.0);
-        assert_eq!(out.dimensions(), src.dimensions());
-
-        // The warp must not panic / produce garbage: same size, all pixels valid.
-        assert_eq!(out.dimensions(), src.dimensions());
-
-        // A zero pose is the identity (no change).
-        let zero = [0.0f32; 6];
-        let identity = pose_warp(&src, &zero, 1.0);
-        assert_eq!(pixel_diff(&src, &identity), 0.0, "zero pose should be identity");
     }
 
     fn pixel_diff(a: &ImageBuffer<Rgba<u8>, Vec<u8>>, b: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> f64 {
