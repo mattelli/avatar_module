@@ -17,10 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from convert_weights import (
     Wav2Lip,
     SimpleWrapperV2,
-    Audio2PoseDecoder,
     load_wav2lip_state,
     load_expnet_state,
-    load_pose_state,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,37 +71,9 @@ def verify_expnet():
     print("expnet OK")
 
 
-def verify_pose():
-    ckpt = torch.load(RES / "auido2pose_00140-model.pth", map_location="cpu", weights_only=False)
-    model = Audio2PoseDecoder()
-    load_pose_state(model, ckpt)
-    model.eval()
-
-    ref = torch.zeros(1, 6)
-    audio_emb = torch.randn(1, 32, 512)
-    z = torch.randn(1, 64)
-    with torch.no_grad():
-        pose_ref = model(ref, audio_emb, z).numpy()
-
-    sess = ort.InferenceSession(str(RES / "pose.onnx"), providers=["CPUExecutionProvider"])
-    out = sess.run(None, {
-        "ref_coeff": ref.numpy(),
-        "audio_emb": audio_emb.numpy(),
-        "z": z.numpy(),
-    })[0]
-
-    print("pose ref:", pose_ref.shape, "onnx:", out.shape)
-    print("max abs diff:", np.abs(pose_ref - out).max())
-    assert pose_ref.shape == out.shape, f"shape mismatch {pose_ref.shape} vs {out.shape}"
-    # BatchNorm folded into conv weights during export; float32 tolerance.
-    assert np.abs(pose_ref - out).max() < 1e-3, "pose output mismatch"
-    print("pose OK")
-
-
 def main():
     verify_wav2lip()
     verify_expnet()
-    verify_pose()
     print("All ONNX round-trip checks passed.")
 
 

@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
-"""Converts Wav2Lip + ExpNet + Audio2Pose + PFLD PyTorch checkpoints to ONNX for Burn import.
+"""Converts Wav2Lip + ExpNet + PFLD PyTorch checkpoints to ONNX for Burn import.
 
 Plan 5, task 2 — weight conversion pipeline.
-Plan 6, task 4 — Audio2Pose decoder conversion (talking-head head motion).
 Plan 7, task 1 — PFLD landmark model conversion (expression control points).
 
 Downloads/uses:
   .res/wav2lip_gan.pth          (Wav2Lip GAN generator, 435 MB)
   .res/auido2exp_00300-model.pth (SadTalker ExpNet, 34 MB)
-  .res/auido2pose_00140-model.pth (SadTalker Audio2Pose CVAE, 91 MB)
   .res/pfld_checkpoint.pth.tar  (PFLD 98-landmark detector, 7 MB)
 
 Produces (into .res/):
   wav2lip_gan.onnx     — the Wav2Lip generator (audio + face -> mouth patch)
   expnet.onnx          — the ExpNet audio->expression MLP
-  pose.onnx            — the Audio2Pose CVAE decoder (audio_emb + z -> pose)
   pfld.onnx            — the PFLD 98-landmark detector (112x112 -> 98 (x,y))
 
 These .onnx files are then imported by burn-onnx (ModelGen in the wav2lip /
 expnet crate build scripts) into .burnpack records, which the Rust runtime
 loads. This script also prints SHA-256 checksums for reproducibility.
 
-Only the generator / ExpNet / Audio2Pose-decoder / PFLD-backbone are exported —
-no discriminator, no training heads. All run in inference (eval) mode.
+Only the generator / ExpNet / PFLD-backbone are exported — no discriminator,
+no training heads. All run in inference (eval) mode.
 """
 
 import argparse
@@ -215,187 +212,6 @@ class SimpleWrapperV2(nn.Module):
         ratio = ratio.reshape(-1, 1)
         y = self.mapping1(torch.cat([x, ref_reshape, ratio], dim=1))
         return y  # B,64
-
-
-# ---------------------------------------------------------------------------
-# Audio2Pose decoder (SadTalker src/audio2pose_models/cvae.py DECODER +
-# res_unet.py ResUnet). Plan 6, task 4.
-#
-# We export only the *decoder* inference path: `decoder(ref, audio_emb, z)`
-# -> pose motion (6 values per frame). The `class` input is fixed to a single
-# default class (0) and `ref` to zeros (neutral start), per the plan.
-#
-# Config (src/config/auido2pose.yaml):
-#   AUDIO_EMB_IN_SIZE=512, AUDIO_EMB_OUT_SIZE=6, SEQ_LEN=32, LATENT_SIZE=64,
-#   NUM_CLASSES=46, DECODER_LAYER_SIZES=[128, 192]
-# ---------------------------------------------------------------------------
-class PoseResidualConv(nn.Module):
-    """ResidualConv from SadTalker networks.py (BN-ReLU-Conv3-ReLU-Conv3 +
-    Conv3 skip)."""
-
-    def __init__(self, input_dim, output_dim, stride, padding):
-        super().__init__()
-        self.conv_block = nn.Sequential(
-            nn.BatchNorm2d(input_dim),
-            nn.ReLU(),
-            nn.Conv2d(input_dim, output_dim, kernel_size=3, stride=stride, padding=padding),
-            nn.BatchNorm2d(output_dim),
-            nn.ReLU(),
-            nn.Conv2d(output_dim, output_dim, kernel_size=3, padding=1),
-        )
-        self.conv_skip = nn.Sequential(
-            nn.Conv2d(input_dim, output_dim, kernel_size=3, stride=stride, padding=1),
-            nn.BatchNorm2d(output_dim),
-        )
-
-    def forward(self, x):
-        return self.conv_block(x) + self.conv_skip(x)
-
-
-class PoseUpsample(nn.Module):
-    """Upsample from SadTalker networks.py (a ConvTranspose2d)."""
-
-    def __init__(self, input_dim, output_dim, kernel, stride):
-        super().__init__()
-        self.upsample = nn.ConvTranspose2d(input_dim, output_dim, kernel_size=kernel, stride=stride)
-
-    def forward(self, x):
-        return self.upsample(x)
-
-
-class PoseResUnet(nn.Module):
-    """ResUnet from SadTalker res_unet.py, channel=1, filters=[32,64,128,256].
-
-    Input: (B, 1, seq_len, 6) -> Output: (B, 1, seq_len, 6)."""
-
-    def __init__(self, channel=1, filters=(32, 64, 128, 256)):
-        super().__init__()
-        self.input_layer = nn.Sequential(
-            nn.Conv2d(channel, filters[0], kernel_size=3, padding=1),
-            nn.BatchNorm2d(filters[0]),
-            nn.ReLU(),
-            nn.Conv2d(filters[0], filters[0], kernel_size=3, padding=1),
-        )
-        self.input_skip = nn.Sequential(
-            nn.Conv2d(channel, filters[0], kernel_size=3, padding=1)
-        )
-        self.residual_conv_1 = PoseResidualConv(filters[0], filters[1], stride=(2, 1), padding=1)
-        self.residual_conv_2 = PoseResidualConv(filters[1], filters[2], stride=(2, 1), padding=1)
-        self.bridge = PoseResidualConv(filters[2], filters[3], stride=(2, 1), padding=1)
-        self.upsample_1 = PoseUpsample(filters[3], filters[3], kernel=(2, 1), stride=(2, 1))
-        self.up_residual_conv1 = PoseResidualConv(filters[3] + filters[2], filters[2], stride=1, padding=1)
-        self.upsample_2 = PoseUpsample(filters[2], filters[2], kernel=(2, 1), stride=(2, 1))
-        self.up_residual_conv2 = PoseResidualConv(filters[2] + filters[1], filters[1], stride=1, padding=1)
-        self.upsample_3 = PoseUpsample(filters[1], filters[1], kernel=(2, 1), stride=(2, 1))
-        self.up_residual_conv3 = PoseResidualConv(filters[1] + filters[0], filters[0], stride=1, padding=1)
-        self.output_layer = nn.Sequential(
-            nn.Conv2d(filters[0], 1, 1, 1),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x):
-        x1 = self.input_layer(x) + self.input_skip(x)
-        x2 = self.residual_conv_1(x1)
-        x3 = self.residual_conv_2(x2)
-        x4 = self.bridge(x3)
-        x4 = self.upsample_1(x4)
-        x5 = torch.cat([x4, x3], dim=1)
-        x6 = self.up_residual_conv1(x5)
-        x6 = self.upsample_2(x6)
-        x7 = torch.cat([x6, x2], dim=1)
-        x8 = self.up_residual_conv2(x7)
-        x8 = self.upsample_3(x8)
-        x9 = torch.cat([x8, x1], dim=1)
-        x10 = self.up_residual_conv3(x9)
-        return self.output_layer(x10)
-
-
-class Audio2PoseDecoder(nn.Module):
-    """The CVAE *decoder* inference path (SadTalker cvae.py DECODER).
-
-    Inputs:
-      ref       (B, 6)     source-face pose (zeros / neutral start)
-      audio_emb (B, 32, 512) Wav2Lip audio embeddings for the 32-frame window
-      z         (B, 64)    latent (None = sampled internally, Some = fixed)
-
-    Output: (B, 32, 6) pose motion (yaw/pitch/roll + tx/ty/tz per frame).
-    """
-
-    def __init__(self, seq_len=32, latent_size=64, num_classes=46,
-                 audio_emb_in_size=512, audio_emb_out_size=6,
-                 decoder_layer_sizes=(128, 192)):
-        super().__init__()
-        self.seq_len = seq_len
-        self.latent_size = latent_size
-        self.num_classes = num_classes
-        self.audio_emb_in_size = audio_emb_in_size
-        self.audio_emb_out_size = audio_emb_out_size
-
-        self.resunet = PoseResUnet()
-        self.MLP = nn.Sequential()
-        input_size = latent_size + seq_len * audio_emb_out_size + 6
-        layer_sizes = (input_size,) + tuple(decoder_layer_sizes)
-        for i, (in_size, out_size) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
-            self.MLP.add_module(f"L{i}", nn.Linear(in_size, out_size))
-            if i + 1 < len(layer_sizes) - 1:
-                self.MLP.add_module(f"A{i}", nn.ReLU())
-            else:
-                self.MLP.add_module("sigmoid", nn.Sigmoid())
-
-        self.pose_linear = nn.Linear(6, 6)
-        self.linear_audio = nn.Linear(audio_emb_in_size, audio_emb_out_size)
-        self.classbias = nn.Parameter(torch.randn(num_classes, latent_size))
-
-    def forward(self, ref, audio_emb, z):
-        bs = z.shape[0]
-        class_id = torch.zeros(bs, dtype=torch.long)
-        audio_out = self.linear_audio(audio_emb)          # B,32,6
-        audio_out = audio_out.reshape([bs, -1])           # B,32*6
-        class_bias = self.classbias[class_id]             # B,64
-        z = z + class_bias
-        x_in = torch.cat([ref, z, audio_out], dim=-1)     # B, 6+64+192
-        x_out = self.MLP(x_in)                            # B,192
-        x_out = x_out.reshape((bs, self.seq_len, -1))     # B,32,6
-        pose_emb = self.resunet(x_out.unsqueeze(1))       # B,1,32,6
-        pose_motion_pred = self.pose_linear(pose_emb.squeeze(1))  # B,32,6
-        return pose_motion_pred
-
-
-def load_pose_state(model: nn.Module, ckpt: dict) -> None:
-    """Loads the Audio2Pose decoder state_dict from the SadTalker checkpoint.
-
-    The checkpoint stores the full CVAE under `netG.*`; we only need the
-    decoder sub-keys. `linear_audio`, `classbias`, `pose_linear`, `MLP`, and
-    `resunet` live under `netG.decoder.*`.
-    """
-    state = ckpt["model"]
-    prefix = "netG.decoder."
-    clean = {}
-    for k, v in state.items():
-        if k.startswith(prefix):
-            clean[k[len(prefix):]] = v
-    model.load_state_dict(clean, strict=False)
-
-
-def export_pose(model: nn.Module, out: Path) -> None:
-    model.eval()
-    ref = torch.zeros(1, 6)
-    audio_emb = torch.randn(1, 32, 512)
-    z = torch.randn(1, 64)
-    torch.onnx.export(
-        model,
-        (ref, audio_emb, z),
-        str(out),
-        input_names=["ref_coeff", "audio_emb", "z"],
-        output_names=["pose_motion"],
-        dynamic_axes={
-            "ref_coeff": {0: "batch"},
-            "audio_emb": {0: "batch"},
-            "z": {0: "batch"},
-            "pose_motion": {0: "batch"},
-        },
-        opset_version=17,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -599,11 +415,9 @@ def main() -> int:
     ap.add_argument("--res", type=Path, default=RES, help="resource dir (default .res)")
     ap.add_argument("--wav2lip", type=Path, default=None, help="wav2lip_gan.pth path")
     ap.add_argument("--expnet", type=Path, default=None, help="auido2exp_00300-model.pth path")
-    ap.add_argument("--pose", type=Path, default=None, help="auido2pose_00140-model.pth path")
     ap.add_argument("--pfld", type=Path, default=None, help="pfld_checkpoint.pth.tar path")
     ap.add_argument("--skip-wav2lip", action="store_true", help="skip wav2lip export")
     ap.add_argument("--skip-expnet", action="store_true", help="skip expnet export")
-    ap.add_argument("--skip-pose", action="store_true", help="skip pose export")
     ap.add_argument("--skip-pfld", action="store_true", help="skip pfld export")
     args = ap.parse_args()
 
@@ -611,7 +425,6 @@ def main() -> int:
     res.mkdir(parents=True, exist_ok=True)
     wav2lip_ckpt = args.wav2lip or (res / "wav2lip_gan.pth")
     expnet_ckpt = args.expnet or (res / "auido2exp_00300-model.pth")
-    pose_ckpt = args.pose or (res / "auido2pose_00140-model.pth")
     pfld_ckpt = args.pfld or (res / "pfld_checkpoint.pth.tar")
 
     results = {}
@@ -641,19 +454,6 @@ def main() -> int:
         export_expnet(model, out)
         print(f"wrote {out} ({out.stat().st_size} bytes)")
         results["expnet.onnx"] = sha256(out)
-
-    if not args.skip_pose:
-        if not pose_ckpt.exists():
-            print(f"missing {pose_ckpt}", file=sys.stderr)
-            return 1
-        print(f"loading Audio2Pose from {pose_ckpt}")
-        ckpt = torch.load(pose_ckpt, map_location="cpu", weights_only=False)
-        model = Audio2PoseDecoder()
-        load_pose_state(model, ckpt)
-        out = res / "pose.onnx"
-        export_pose(model, out)
-        print(f"wrote {out} ({out.stat().st_size} bytes)")
-        results["pose.onnx"] = sha256(out)
 
     if not args.skip_pfld:
         if not pfld_ckpt.exists():
