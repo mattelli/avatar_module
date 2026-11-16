@@ -14,8 +14,7 @@
 //!    it, driven by **PFLD-detected** control points (Plan 7, tasks 2–3).
 //! 6. The 112×112 face is resized back to M×M and **in-painted** into the N×N
 //!    square at the bbox rect (2 px feather) — no sub-region mask, no seam.
-//! 7. [`pose::Audio2Pose`] head motion is applied to the whole N×N frame.
-//! 8. The frame is resized to the requested output size.
+//! 7. The frame is resized to the requested output size.
 //!
 //! Returns RGBA frames at `FusionConfig::size`, which the caller encodes to
 //! MP4 with the existing encoder/muxer (audio keeps the original TTS rate).
@@ -27,7 +26,7 @@ use expnet::backend::{Backend, BackendPreference};
 use image::{ImageBuffer, Rgba};
 
 use crate::analysis::FPS;
-use crate::fusion::{FusionConfig, patch_to_image, pose_warp, warp_from_landmarks};
+use crate::fusion::{FusionConfig, patch_to_image, warp_from_landmarks};
 use crate::inpaint::{DEFAULT_FEATHER_PX, FaceRect, crop_face_padded, paste_face};
 
 /// Sample rate the Wav2Lip / ExpNet models expect.
@@ -203,13 +202,12 @@ pub fn render_talking_head(
         .predict(&chunks, &faces)
         .context("wav2lip predict")?;
 
-    // 9. Steps 3–6: one frame per video frame. Each frame uses **its own**
+    // 9. Steps 3–5: one frame per video frame. Each frame uses **its own**
     //    Wav2Lip patch (one per mel chunk) — the mouth must follow the audio
     //    window for that frame, not a single reused face. Per frame:
     //      step 3: 96×96 patch → 112×112, PFLD landmarks → expression warp;
     //      step 4: 112×112 → M×M, in-paint into the N×N square;
-    //      step 5: head-pose warp on the whole frame;
-    //      step 6: resize to the requested output size.
+    //      step 5: resize to the requested output size.
     let mut frames = Vec::with_capacity(video_frames);
     for i in 0..video_frames {
         // The Wav2Lip patch for this frame's audio window (chunks ≈ frames;
@@ -239,27 +237,12 @@ pub fn render_talking_head(
         );
         let square2 = paste_face(&square, &face_m, rect, DEFAULT_FEATHER_PX);
 
-        // Step 5: head-pose warp on the whole frame (background moves too).
-        let pose_row = {
-            let n = pose_seq.len() / 6;
-            if n == 0 {
-                None
-            } else {
-                let idx = i.min(n - 1);
-                Some(&pose_seq[idx * 6..(idx + 1) * 6])
-            }
-        };
-        let posed = match pose_row {
-            Some(p) => pose_warp(&square2, p, cfg.strength),
-            None => square2,
-        };
-
-        // Step 6: resize to the requested output size.
-        let frame = if posed.dimensions() == (cfg.size, cfg.size) {
-            posed
+        // Step 5: resize to the requested output size.
+        let frame = if square2.dimensions() == (cfg.size, cfg.size) {
+            square2
         } else {
             image::imageops::resize(
-                &posed,
+                &square2,
                 cfg.size,
                 cfg.size,
                 image::imageops::FilterType::Triangle,
@@ -623,10 +606,10 @@ mod tests {
         let _ = std::fs::remove_file(&out);
     }
 
-    /// T7: with a fixed pose seed the render is byte-identical across runs
-    /// (reproducible head motion); with `None` it differs (stochastic latent).
+    /// The render is deterministic: identical inputs produce byte-identical
+    /// frames (no stochastic latent — the pose warp was removed).
     #[test]
-    fn talking_head_pose_seed_determinism() {
+    fn talking_head_render_is_deterministic() {
         if !models_present() {
             return;
         }
@@ -637,44 +620,13 @@ mod tests {
             .collect();
         let cfg = FusionConfig::default().with_size(128);
 
-        // Same seed -> identical frames (the seed is threaded through and the
-        // latent is reproducible).
         let a = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto, 25.0)
             .unwrap();
         let b = render_talking_head(&samples, sr, None, &cfg, Some(1234), BackendPreference::Auto, 25.0)
             .unwrap();
         assert_eq!(a.len(), b.len());
         for (fa, fb) in a.iter().zip(b.iter()) {
-            assert_eq!(fa.as_raw(), fb.as_raw(), "seeded pose should be identical");
+            assert_eq!(fa.as_raw(), fb.as_raw(), "render should be deterministic");
         }
-
-        // No seed -> stochastic latent. A single pair can coincidentally round
-        // to identical pixels (a near-identity warp), so sample several runs
-        // and require that at least one pair differs.
-        let mut prev: Option<Vec<image::ImageBuffer<Rgba<u8>, Vec<u8>>>> = None;
-        let mut any_diff = false;
-        for _ in 0..8 {
-            let f = render_talking_head(&samples, sr, None, &cfg, None, BackendPreference::Auto, 25.0)
-                .unwrap();
-            if let Some(p) = &prev {
-                let diff: u64 = p
-                    .iter()
-                    .zip(f.iter())
-                    .map(|(fc, fd)| {
-                        fc.as_raw()
-                            .iter()
-                            .zip(fd.as_raw().iter())
-                            .map(|(x, y)| (*x as i64 - *y as i64).unsigned_abs())
-                            .sum::<u64>()
-                    })
-                    .sum();
-                if diff > 0 {
-                    any_diff = true;
-                    break;
-                }
-            }
-            prev = Some(f);
-        }
-        assert!(any_diff, "unseeded pose should differ across runs");
     }
 }
