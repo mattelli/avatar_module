@@ -523,50 +523,6 @@ impl Model {
         }
     }
 
-    /// Runs only the audio encoder (`conv2d1`..`conv2d13`) and returns the
-    /// `[b, 512, 1, 1]` audio embedding.
-    ///
-    /// This is the `relu13` activation used by the decoder inside [`forward`]
-    /// and consumed by Audio2Pose (Plan 6). It mirrors the first part of
-    /// [`forward`] exactly.
-    #[allow(clippy::let_and_return, clippy::approx_constant)]
-    pub fn audio_embedding(&self, audio_sequences: Tensor<4>) -> Tensor<4> {
-        let conv2d1_out1 = self.conv2d1.forward(audio_sequences);
-        let relu1_out1 = burn::tensor::activation::relu(conv2d1_out1);
-        let conv2d2_out1 = self.conv2d2.forward(relu1_out1.clone());
-        let add1_out1 = conv2d2_out1.add(relu1_out1);
-        let relu2_out1 = burn::tensor::activation::relu(add1_out1);
-        let conv2d3_out1 = self.conv2d3.forward(relu2_out1.clone());
-        let add2_out1 = conv2d3_out1.add(relu2_out1);
-        let relu3_out1 = burn::tensor::activation::relu(add2_out1);
-        let conv2d4_out1 = self.conv2d4.forward(relu3_out1);
-        let relu4_out1 = burn::tensor::activation::relu(conv2d4_out1);
-        let conv2d5_out1 = self.conv2d5.forward(relu4_out1.clone());
-        let add3_out1 = conv2d5_out1.add(relu4_out1);
-        let relu5_out1 = burn::tensor::activation::relu(add3_out1);
-        let conv2d6_out1 = self.conv2d6.forward(relu5_out1.clone());
-        let add4_out1 = conv2d6_out1.add(relu5_out1);
-        let relu6_out1 = burn::tensor::activation::relu(add4_out1);
-        let conv2d7_out1 = self.conv2d7.forward(relu6_out1);
-        let relu7_out1 = burn::tensor::activation::relu(conv2d7_out1);
-        let conv2d8_out1 = self.conv2d8.forward(relu7_out1.clone());
-        let add5_out1 = conv2d8_out1.add(relu7_out1);
-        let relu8_out1 = burn::tensor::activation::relu(add5_out1);
-        let conv2d9_out1 = self.conv2d9.forward(relu8_out1.clone());
-        let add6_out1 = conv2d9_out1.add(relu8_out1);
-        let relu9_out1 = burn::tensor::activation::relu(add6_out1);
-        let conv2d10_out1 = self.conv2d10.forward(relu9_out1);
-        let relu10_out1 = burn::tensor::activation::relu(conv2d10_out1);
-        let conv2d11_out1 = self.conv2d11.forward(relu10_out1.clone());
-        let add7_out1 = conv2d11_out1.add(relu10_out1);
-        let relu11_out1 = burn::tensor::activation::relu(add7_out1);
-        let conv2d12_out1 = self.conv2d12.forward(relu11_out1);
-        let relu12_out1 = burn::tensor::activation::relu(conv2d12_out1);
-        let conv2d13_out1 = self.conv2d13.forward(relu12_out1);
-        let relu13_out1 = burn::tensor::activation::relu(conv2d13_out1);
-        relu13_out1
-    }
-
     #[allow(clippy::let_and_return, clippy::approx_constant)]
     pub fn forward(
         &self,
