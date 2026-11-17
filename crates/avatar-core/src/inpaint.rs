@@ -256,16 +256,17 @@ mod tests {
         let edge = out.get_pixel(40, 20);
         assert_eq!(edge[0], 0, "outermost edge should be the frame colour");
 
-        // One pixel in (d = 1, feather = 2) -> alpha 0.5 -> mid grey.
+        // One pixel in (d = 1) -> alpha = 1 / feather -> a partial blend.
         let ramp = out.get_pixel(40, 21);
         assert!(
-            ramp[0] > 20 && ramp[0] < 235,
+            ramp[0] > 0 && ramp[0] < 255,
             "feather pixel should be a partial blend, got {}",
             ramp[0]
         );
 
-        // Two pixels in (d = 2) -> alpha 1 -> full patch colour.
-        let core = out.get_pixel(40, 22);
+        // `feather` pixels in (d = feather) -> alpha 1 -> full patch colour.
+        // Derived from the constant so the test does not pin the ramp width.
+        let core = out.get_pixel(40, 20 + DEFAULT_FEATHER_PX);
         assert_eq!(core[0], 255, "interior should be the full patch colour");
     }
 
