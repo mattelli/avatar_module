@@ -32,7 +32,6 @@ plays video only and prints a hint.
 
 import argparse
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path

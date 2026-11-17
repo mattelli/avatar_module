@@ -95,33 +95,6 @@ impl H264Encoder {
     }
 }
 
-/// Converts an RGBA8 buffer to I420 (YUV 4:2:0 planar).
-pub fn rgba_to_i420(frame: &image::ImageBuffer<Rgba<u8>, Vec<u8>>) -> Vec<u8> {
-    let (w, h) = frame.dimensions();
-    let (w, h) = (w as usize, h as usize);
-    let mut yuv = vec![0u8; w * h + 2 * ((w / 2) * (h / 2))];
-    let (y_plane, uv_plane) = yuv.split_at_mut(w * h);
-    let (u_plane, v_plane) = uv_plane.split_at_mut((w / 2) * (h / 2));
-
-    for y in 0..h {
-        for x in 0..w {
-            let p = frame.get_pixel(x as u32, y as u32);
-            let r = p[0] as f32;
-            let g = p[1] as f32;
-            let b = p[2] as f32;
-            let yy = 0.257 * r + 0.504 * g + 0.098 * b + 16.0;
-            y_plane[y * w + x] = yy.clamp(0.0, 255.0) as u8;
-            if y % 2 == 0 && x % 2 == 0 {
-                let u = -0.148 * r - 0.291 * g + 0.439 * b + 128.0;
-                let v = 0.439 * r - 0.368 * g - 0.071 * b + 128.0;
-                let i = (y / 2) * (w / 2) + x / 2;
-                u_plane[i] = u.clamp(0.0, 255.0) as u8;
-                v_plane[i] = v.clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    yuv
-}
 
 /// A NAL unit parsed from an Annex-B bitstream.
 #[derive(Debug, Clone, PartialEq)]
@@ -468,14 +441,6 @@ mod tests {
                 f
             })
             .collect()
-    }
-
-    /// T8: RGBA → I420 conversion produces correct plane sizes.
-    #[test]
-    fn rgba_to_i420_sizes() {
-        let frame = test_face_cpu(64, 64);
-        let yuv = rgba_to_i420(&frame);
-        assert_eq!(yuv.len(), 64 * 64 + 2 * (32 * 32));
     }
 
     /// T8: Annex-B split finds SPS, PPS and slice NALs.
