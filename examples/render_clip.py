@@ -57,7 +57,7 @@ def _upscale(cv2, frame, scale: int):
     if scale <= 1:
         return frame
     h, w = frame.shape[:2]
-    return cv2.resize(frame, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST)
+    return cv2.resize(frame, (w * scale, h * scale), interpolation=cv2.INTER_LANCZOS4)
 
 
 def extract_audio(imageio_ffmpeg, video: Path, wav: Path) -> bool:
@@ -158,7 +158,7 @@ def main() -> None:
     parser.add_argument("--save-frame", default=None, help="path for the dumped frame (default: frame_N.png)")
     parser.add_argument("--scale", type=int, default=1, help="upscale factor for display/dump (default 1)")
     parser.add_argument("--no-audio", action="store_true", help="disable audio playback")
-    parser.add_argument("--size", type=int, default=128, choices=[64, 128, 256, 512], help="output size in px (default 256)")
+    parser.add_argument("--size", type=int, default=256, choices=[64, 128, 256, 512], help="output size in px (default 256)")
     parser.add_argument("--wgpu", action="store_true", help="use the GPU (burn-wgpu) instead of the default CPU backend")
     parser.add_argument("--fps", type=float, default=16.0, help="output video frame rate (default 16)")
     args = parser.parse_args()
@@ -169,8 +169,8 @@ def main() -> None:
         voice_model=str(MODEL),
         picture=str(PICTURE),
         size=args.size,
-        speech_speed=0.7,     # speech speed (0.5 = slow, 1.0 = normal, 2.0 = fast)
-        strength=0.25,        # pose wrapper strength
+        speech_speed=0.8,     # speech speed (0.5 = slow, 1.0 = normal, 2.0 = fast)
+        strength=0.10,        # pose wrapper strength
         face_crop=True,        # center-crop to the detected face
         face_crop_margin=0.35,  # margin around the face box
         backend="gpu" if args.wgpu else "auto",  # default CPU; --wgpu forces burn-wgpu

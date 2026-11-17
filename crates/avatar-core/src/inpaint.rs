@@ -27,7 +27,7 @@ use image::{ImageBuffer, Rgba};
 pub const PADS: (i64, i64, i64, i64) = (0, 10, 0, 0);
 
 /// Default feather (ramp width) of the in-paint boundary, in pixels.
-pub const DEFAULT_FEATHER_PX: u32 = 2;
+pub const DEFAULT_FEATHER_PX: u32 = 10;
 
 /// A face crop rectangle in the pixel coordinates of the N×N square.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +140,7 @@ pub fn inpaint_regions(
             patch,
             dw,
             dh,
-            image::imageops::FilterType::Triangle,
+            image::imageops::FilterType::Lanczos3,
         );
 
         let f = region.feather_px as f32;

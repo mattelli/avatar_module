@@ -194,7 +194,7 @@ pub fn render_talking_head(
             &face96,
             EXPR_SIZE,
             EXPR_SIZE,
-            image::imageops::FilterType::Triangle,
+            image::imageops::FilterType::Lanczos3,
         );
 
         // Step 3: PFLD landmarks on this (clean, unwarped) Wav2Lip face, then
@@ -208,7 +208,7 @@ pub fn render_talking_head(
             &expr_face,
             rect.w,
             rect.h,
-            image::imageops::FilterType::Triangle,
+            image::imageops::FilterType::Lanczos3,
         );
         let square2 = paste_face(&square, &face_m, rect, DEFAULT_FEATHER_PX);
 
@@ -220,7 +220,7 @@ pub fn render_talking_head(
                 &square2,
                 cfg.size,
                 cfg.size,
-                image::imageops::FilterType::Triangle,
+                image::imageops::FilterType::Lanczos3,
             )
         };
         frames.push(frame);

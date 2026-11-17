@@ -37,7 +37,7 @@ impl H264Encoder {
         let config = openh264::encoder::EncoderConfig::new()
             .max_frame_rate(openh264::encoder::FrameRate::from_hz(fps))
             .rate_control_mode(openh264::encoder::RateControlMode::Quality)
-            .bitrate(openh264::encoder::BitRate::from_bps(120_000));
+            .bitrate(openh264::encoder::BitRate::from_bps(4_096_000));
         let inner = openh264::encoder::Encoder::with_api_config(
             openh264::OpenH264API::from_source(),
             config,

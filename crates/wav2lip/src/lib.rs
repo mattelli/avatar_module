@@ -237,7 +237,7 @@ pub fn face_input(face: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> FaceInput {
         face,
         IMG_SIZE,
         IMG_SIZE,
-        image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::Lanczos3,
     );
     // Channel-major (planar) layout: channel `c` occupies `[c*plane, (c+1)*plane)`.
     let plane = (IMG_SIZE * IMG_SIZE) as usize; // 96 * 96 = 9216
@@ -282,7 +282,7 @@ pub fn crop_face(
     let h = (y2 - y1).max(1);
 
     let crop = image::imageops::crop_imm(img, x1, y1, w, h).to_image();
-    image::imageops::resize(&crop, IMG_SIZE, IMG_SIZE, image::imageops::FilterType::Triangle)
+    image::imageops::resize(&crop, IMG_SIZE, IMG_SIZE, image::imageops::FilterType::Lanczos3)
 }
 
 #[cfg(test)]
